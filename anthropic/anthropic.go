@@ -391,6 +391,39 @@ func FromMessagesRequest(r MessagesRequest) (*api.ChatRequest, error) {
 	return convertedRequest, nil
 }
 
+func extractBase64ImageSource(source *ImageSource) (api.ImageData, error) {
+	if source == nil {
+		return nil, errors.New("invalid image source")
+	}
+
+	if source.Type == "base64" {
+		decoded, err := base64.StdEncoding.DecodeString(source.Data)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 image data: %w", err)
+		}
+		return decoded, nil
+	}
+	return nil, fmt.Errorf("invalid image source type: %s. Only base64 images are supported", source.Type)
+}
+
+func extractBase64Image(blockMap map[string]any) (api.ImageData, error) {
+	source, ok := blockMap["source"].(map[string]any)
+	if !ok {
+		return nil, errors.New("invalid image source")
+	}
+
+	sourceType, _ := source["type"].(string)
+	if sourceType == "base64" {
+		data, _ := source["data"].(string)
+		decoded, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 image data: %w", err)
+		}
+		return decoded, nil
+	}
+	return nil, fmt.Errorf("invalid image source type: %s. Only base64 images are supported", sourceType)
+}
+
 // convertMessage converts an Anthropic MessageParam to Ollama api.Message(s)
 func convertMessage(msg MessageParam) ([]api.Message, error) {
 	var messages []api.Message
@@ -420,22 +453,12 @@ func convertMessage(msg MessageParam) ([]api.Message, error) {
 
 		case "image":
 			imageBlocks++
-			if block.Source == nil {
-				logutil.Trace("anthropic: invalid image source", "role", role)
-				return nil, errors.New("invalid image source")
+			decoded, err := extractBase64ImageSource(block.Source)
+			if err != nil {
+				logutil.Trace("anthropic: failed to extract image", "role", role, "error", err)
+				return nil, err
 			}
-
-			if block.Source.Type == "base64" {
-				decoded, err := base64.StdEncoding.DecodeString(block.Source.Data)
-				if err != nil {
-					logutil.Trace("anthropic: invalid base64 image data", "role", role, "error", err)
-					return nil, fmt.Errorf("invalid base64 image data: %w", err)
-				}
-				images = append(images, decoded)
-			} else {
-				logutil.Trace("anthropic: unsupported image source type", "role", role, "source_type", block.Source.Type)
-				return nil, fmt.Errorf("invalid image source type: %s. Only base64 images are supported.", block.Source.Type)
-			}
+			images = append(images, decoded)
 
 		case "tool_use":
 			toolUseBlocks++
@@ -458,17 +481,42 @@ func convertMessage(msg MessageParam) ([]api.Message, error) {
 		case "tool_result":
 			toolResultBlocks++
 			var resultContent string
+			var resultImages []api.ImageData
 
 			switch c := block.Content.(type) {
 			case string:
 				resultContent = c
+			case []ContentBlock:
+				for _, cb := range c {
+					switch cb.Type {
+					case "text":
+						if cb.Text != nil {
+							resultContent += *cb.Text
+						}
+					case "image":
+						decoded, err := extractBase64ImageSource(cb.Source)
+						if err != nil {
+							logutil.Trace("anthropic: failed to extract image from tool_result", "role", role, "error", err)
+							return nil, err
+						}
+						resultImages = append(resultImages, decoded)
+					}
+				}
 			case []any:
 				for _, cb := range c {
 					if cbMap, ok := cb.(map[string]any); ok {
-						if cbMap["type"] == "text" {
+						switch cbMap["type"] {
+						case "text":
 							if text, ok := cbMap["text"].(string); ok {
 								resultContent += text
 							}
+						case "image":
+							decoded, err := extractBase64Image(cbMap)
+							if err != nil {
+								logutil.Trace("anthropic: failed to extract image from tool_result", "role", role, "error", err)
+								return nil, err
+							}
+							resultImages = append(resultImages, decoded)
 						}
 					}
 				}
@@ -477,6 +525,7 @@ func convertMessage(msg MessageParam) ([]api.Message, error) {
 			toolResults = append(toolResults, api.Message{
 				Role:       "tool",
 				Content:    resultContent,
+				Images:     resultImages,
 				ToolCallID: block.ToolUseID,
 			})
 
