@@ -80,7 +80,7 @@ jobs:
             echo "deb [signed-by=/usr/share/keyrings/lunarg-archive-keyring.gpg]  https://packages.lunarg.com/vulkan/1.4.313 jammy main" | $sudo tee /etc/apt/sources.list.d/lunarg-vulkan-1.4.313-jammy.list > /dev/null
             $sudo apt-get update
           fi
-          $sudo apt-get install -y cmake ccache curl ${{ matrix.extra-packages }}
+          $sudo apt-get install -y cmake ccache curl git ${{ matrix.extra-packages }}
           # llama-server requires CMake 3.24+, while Ubuntu 22.04 ships 3.22.
           curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.31.2/cmake-3.31.2-linux-$(uname -m).tar.gz | $sudo tar xz -C /usr/local --strip-components 1
           # Export VULKAN_SDK if provided by LunarG package (defensive)

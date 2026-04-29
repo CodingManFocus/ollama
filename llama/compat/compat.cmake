@@ -16,10 +16,10 @@
 #     )
 #
 # The compat layer consists of:
-#   1. Two new source files dropped into the fetched tree's src/
-#      (llama-ollama-compat.{h,cpp}) — Ollama-owned.
-#   2. A small patch (upstream-edits.patch) that wires the new files into
-#      the build and adds call-sites in upstream loaders.
+#   1. Ollama-owned compat source files linked into the fetched llama.cpp
+#      targets from this directory.
+#   2. A small patch (upstream-edits.patch) that adds call-sites in upstream
+#      loaders.
 
 set(_compat_dir ${CMAKE_CURRENT_LIST_DIR})
 
@@ -28,7 +28,7 @@ set(_compat_dir ${CMAKE_CURRENT_LIST_DIR})
 # is idempotent — re-configuring or rebuilding won't fail with "already
 # applied".
 #
-# The compat source files (.h, .cpp) are NOT copied into the fetched tree.
+# The compat source files are NOT copied into the fetched tree.
 # Instead, llama/server/CMakeLists.txt does target_sources() on the llama
 # target after FetchContent_MakeAvailable. That keeps Ollama's code in
 # Ollama's tree and makes the patch pure call-site insertions.
@@ -39,10 +39,10 @@ set(OLLAMA_LLAMA_CPP_COMPAT_PATCH_COMMAND
     CACHE INTERNAL "llama.cpp compat patch command for FetchContent")
 
 # Where the compat source files live, so the main CMakeLists can wire them
-# into the llama target.
+# into the llama.cpp targets that need the hooks.
 set(OLLAMA_LLAMA_CPP_COMPAT_DIR
     "${_compat_dir}"
-    CACHE INTERNAL "Directory holding llama-ollama-compat.{h,cpp}")
+    CACHE INTERNAL "Directory holding llama.cpp compat sources")
 
 # Also export the individual paths in case callers want to do something
 # custom (e.g. emit a dependency on the patch so reconfigures re-apply).
@@ -53,4 +53,6 @@ set(OLLAMA_LLAMA_CPP_COMPAT_PATCH_FILE
 set(OLLAMA_LLAMA_CPP_COMPAT_SOURCES
     "${_compat_dir}/llama-ollama-compat.h"
     "${_compat_dir}/llama-ollama-compat.cpp"
-    CACHE INTERNAL "Source files copied into llama.cpp's src/ dir")
+    "${_compat_dir}/llama-ollama-compat-util.h"
+    "${_compat_dir}/llama-ollama-compat-util.cpp"
+    CACHE INTERNAL "Source files linked into llama.cpp targets")

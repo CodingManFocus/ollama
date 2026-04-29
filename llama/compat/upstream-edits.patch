@@ -12,7 +12,7 @@ index 4e65a45a5..75836c683 100644
  #include <array>
 @@ -549,6 +550,7 @@ llama_model_loader::llama_model_loader(
          }
-
+ 
          get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
 +        if (llama_ollama_compat::translate_metadata(this, metadata, ctx, arch_name, fname.c_str())) use_mmap = false;
          llm_kv = LLM_KV(llm_arch_from_string(arch_name));
@@ -40,7 +40,7 @@ index 4e65a45a5..75836c683 100644
                  throw std::runtime_error(format("invalid model: tensor '%s' is duplicated", ggml_get_name(cur)));
 @@ -1535,3 +1542,4 @@ bool llama_model_loader::load_all_data(
          size_t n_size = ggml_nbytes(cur);
-
+ 
 +        if (llama_ollama_compat::maybe_load_text_tensor(this, cur, weight->offs)) continue;
          if (use_mmap) {
 diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp

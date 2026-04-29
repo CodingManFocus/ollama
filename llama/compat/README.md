@@ -5,49 +5,91 @@ This directory holds an in-process compatibility layer that lets upstream
 pulled from the Ollama registry) without re-converting or re-downloading.
 
 The layer is applied automatically at build time via CMake `FetchContent`'s
-`PATCH_COMMAND` — there is no separate "apply patches" step.
+`PATCH_COMMAND` for normal fetched builds — there is no separate "apply
+patches" step. If CMake is pointed at a source override through
+`FETCHCONTENT_SOURCE_DIR_LLAMA_CPP`, the same patch is applied directly during
+configure. If `OLLAMA_LLAMA_CPP_SOURCE` is set, the patch is intentionally not
+applied so a developer can iterate on a local llama.cpp tree explicitly.
 
 ## Files
 
 - `llama-ollama-compat.h`, `llama-ollama-compat.cpp` — the shim itself. These
-  are regular source files owned by Ollama; they get copied into the fetched
-  llama.cpp source tree during configure.
+  are regular source files owned by Ollama; they are linked into the fetched
+  `llama` and `mtmd` targets from this directory with `target_sources`.
+- `llama-ollama-compat-util.h`, `llama-ollama-compat-util.cpp` — shared helper
+  code for KV edits, tensor renames, skip-prefix tracking, tensor load ops,
+  and small tensor repacking primitives.
 - `upstream-edits.patch` — small additive edits to upstream files so the
-  shim gets called. Currently ~48 lines touching 6 files. Kept as a real
-  `git` patch so re-generation on upstream bumps is one command.
+  shim gets called. It currently touches only `src/llama-model-loader.cpp`
+  and `tools/mtmd/clip.cpp`. Kept as a real `git` patch so re-generation on
+  upstream bumps is one command.
+- `compat.cmake`, `apply-patch.cmake` — CMake glue and an idempotent patch
+  applier used by `llama/server/CMakeLists.txt`.
+
+This directory replaces the old `llama/patches` stack for llama-server builds;
+the active upstream edit surface is `upstream-edits.patch` plus the
+Ollama-owned source files above.
 
 ## What the shim does
 
-The shim runs at two well-defined points in the loader:
+The shim runs at a small set of loader hook points:
 
-1. **After `gguf_init_from_file`**, for both the main model loader and the
-   `mtmd/clip` loader: inspects the just-parsed metadata and decides whether
+1. **Main model constructor, after the architecture is read**:
+   `translate_metadata` inspects the just-parsed metadata and decides whether
    the file is an Ollama-format GGUF. If so, it mutates the in-memory
-   `gguf_context` and `ggml_context` (KV names, tensor names, tensor types)
-   so the rest of the loader sees an upstream-shape file.
+   `gguf_context` and `ggml_context` (KV names, tensor names, tensor types,
+   tensor shapes, and selected tokenizer metadata) so the rest of the loader
+   sees an upstream-shape file. It can also request mmap disablement when a
+   handler needs writable backend buffers for transformed tensor data.
 
-2. **After `load_all_data`**: applies any numerical fix-ups that need the
-   tensors in their final backend buffers (e.g. RMSNorm `+1` if a future
-   arch needs it — gemma3 doesn't).
+2. **Main model tensor indexing**: `should_skip_tensor` hides embedded
+   projector, vision, audio, MTP, or other Ollama-only tensors from the text
+   loader's weights map.
 
-Non-Ollama files are detected by the absence of Ollama-specific KV keys
-(e.g. `gemma3.mm.tokens_per_image`) or embedded `v.*` / `mm.*` tensors in
-the main model file. When no markers are present every compat function is
-an immediate no-op.
+3. **Main model tensor load loop**: `maybe_load_text_tensor` applies registered
+   text-side load operations, such as FFN concat or dtype promotion, before
+   the normal upstream file read.
+
+4. **`mtmd/clip` constructor**: `translate_clip_metadata` rewrites a
+   clip-facing view of monolithic Ollama GGUFs into upstream mmproj shape.
+   It also handles legacy LLaVA/BakLLaVA projectors that need a default
+   `clip.projector_type`.
+
+5. **`mtmd/clip` tensor load loop**: `maybe_load_tensor` applies clip-side
+   load operations, such as F16 to F32 promotion, QKV merge, tensor repack,
+   tensor split, or zero-fill.
+
+Non-Ollama files are detected per architecture by the absence of the legacy
+Ollama markers each handler expects. When no handler matches, every compat
+entry point is a no-op.
 
 ## Currently supported architectures
 
-| Arch | Text loader | Clip (mmproj) loader |
+This table tracks the dispatch surface. The per-handler comments in
+`llama-ollama-compat.cpp` are the source of truth for exact KV/tensor maps.
+
+| Internal arch / marker | Text loader handling | Clip/mmproj handling |
 |---|---|---|
-| `gemma3` | KV injection (`layer_norm_rms_epsilon`, `rope.freq_base`, `rope.freq_base_swa`), tokenizer vocab truncation, drop `v.*`/`mm.*` tensors | Arch rewrite to `clip`, KV synthesis (`clip.vision.*`, `clip.projector_type=gemma3`), tensor renames (`v.patch_embedding`→`v.patch_embd`, `mlp.fc{1,2}`→`ffn_{down,up}`, etc.), F16→F32 promotion for patch/position embeddings (Metal IM2COL requirement) |
-| `qwen35moe` | head_count_kv array → scalar, rope dimension_sections pad 3→4, `ssm_dt`→`ssm_dt.bias` rename, drop `v.*`/`mm.*`/`mtp.*` tensors | Arch rewrite to `clip`, KV synthesis (`clip.vision.*`, `clip.projector_type=qwen3vl_merger`), per-block QKV merge (concat at load time), patch_embed reshape + F16→F32 + slice-as-temporal-pair (reclaiming an orphan `v.blk.0.attn_k` slot for the second pair) |
-| `gptoss` | Arch rename `gptoss`→`gpt-oss` (incl. KV prefix), inject `gpt-oss.expert_feed_forward_length` from `ffn_gate_exps` shape, tensor renames (`attn_out`→`attn_output`, `attn_sinks`→`attn_sinks.weight`, `ffn_norm`→`post_attention_norm`) | n/a |
-| `lfm2` | Tensor rename `output_norm.weight`→`token_embd_norm.weight`, fix stale `lfm2.feed_forward_length` from `ffn_gate` shape | n/a |
-| `mistral3` | RoPE YaRN renames (`rope.scaling.beta_*`→`rope.scaling.yarn_beta_*`), `rope.scaling_beta`→`attention.temperature_scale`, drop `v.*`/`mm.*` tensors | Arch rewrite to `clip`, KV synthesis (`clip.vision.*`, `clip.projector_type=pixtral`), tensor renames (`v.patch_conv`→`v.patch_embd`, `v.encoder_norm`→`v.pre_ln`, `attn_output`→`attn_out`, `attn_norm`/`ffn_norm`→`ln1`/`ln2`, `mm.linear_{1,2}`→`mm.{1,2}`, `mm.norm`→`mm.input_norm`, `mm.patch_merger.merging_layer`→`mm.patch_merger`), zero-fill `v.token_embd.img_break` (reclaims `output_norm.weight` slot — Ollama's monolithic blob doesn't ship this tensor and per-row dequant of token_embd Q4_K is heavyweight; zero-fill makes [IMG_BREAK] insertion a no-op), F32 promote of `v.patch_embd.weight` (Metal IM2COL), LLaMA-style RoPE permute on vision Q/K (Ollama's converter skips repacking `v.*` tensors but pixtral expects HF-permuted layout) |
-| `qwen35` | Same fixes as `qwen35moe` (head_count_kv array→scalar, rope dimension_sections pad 3→4, `ssm_dt`→`ssm_dt.bias`, drop `v.*`/`mm.*`/`mtp.*`) but for the non-MoE qwen3.5 (e.g. 9B). Both arches share `apply_qwen35_text_fixes`. | n/a |
-| `gemma4` | Drop `a.*`/`v.*`/`mm.*` (audio + vision + projector) from the text loader. Covers both E2B/E4B (dense) and 26B-A4B (MoE). | n/a |
-| `deepseekocr` | Arch rename `deepseekocr`→`deepseek2-ocr` (incl. KV prefix), inject `expert_feed_forward_length` from `ffn_down_exps` shape, `expert_shared_count` from `ffn_down_shexp` shape, default `attention.layer_norm_rms_epsilon`, drop `s.*`/`v.*`/`mm.*` | Arch rewrite to `clip`, KV synthesis (`clip.vision.*`, `clip.vision.sam.*`, `clip.projector_type=deepseekocr`, defaults for `feed_forward_length`/`projection_dim`/`window_size`/image stats), prefix-only rename `s.*`→`v.sam.*` (substring rename would corrupt `mm.layers`), CLIP leaf renames (`self_attn.{out,qkv}_proj`→`attn_{out,qkv}`, `layer_norm{1,2}`→`ln{1,2}`, `mlp.fc{1,2}`→`ffn_{up,down}`, `pre_layrnorm`→`pre_ln`), SAM leaf renames (`attn.proj`→`attn.out`, `attn.rel_pos_{h,w}`→`attn.pos_{h,w}.weight`, `norm{1,2}`→`{pre,post}_ln`), projector renames (`mm.layers`→`mm.model.fc`, `mm.image_newline`/`view_seperator`→`v.*`), F32 promote of `v.patch_embd.weight`, `v.sam.patch_embd.weight`, `v.position_embd.weight` |
-| `nemotron_h_moe` | For latent-FFN variants (e.g. nemotron-3-super 120B-A12B): inject `moe_latent_size` from `ffn_latent_in.weight` ne[1], rename `ffn_latent_{in,out}`→`ffn_latent_{down,up}`. For all variants: drop `mtp.*` (Multi-Token Prediction tensors that Ollama emits as one-tensor-per-expert; ~1040 extras on the 120B). Standard variants (e.g. nemotron-cascade-2 30B-A3B) load with no rename, only the MTP skip. | n/a |
+| `gemma3` | Legacy Gemma 3 metadata, tokenizer, and embedded vision/projector cleanup. | `gemma3` projector translation. |
+| `gemma3` + embedding markers (`embeddinggemma`) | Rewrites to upstream `gemma-embedding`, fixes embedding-specific KVs and dense/norm tensors. | n/a |
+| `bert` + Snowflake markers (`snowflake-arctic-embed2`) | Fixes legacy Snowflake Arctic Embed 2 tokenizer metadata. | n/a |
+| `gemma3n` | Normalizes tokenizer/EOS metadata, truncates vocab-shaped tensors, and drops unused embedded vision/audio/projector tensors. | n/a |
+| `gemma4` | Drops audio/vision/projector tensors from the text view while audio remains unsupported upstream. | `gemma4` projector translation. |
+| `gptoss` | Renames to upstream `gpt-oss`, copies KVs, injects missing expert FFN metadata, and renames tensors. | n/a |
+| `lfm2` | Renames stale norm tensors and fixes feed-forward metadata. | n/a |
+| `olmo3` | Rewrites to the upstream OLMo2-compatible loader path. | n/a |
+| `mistral3` | Fixes RoPE/YaRN metadata and hides embedded vision/projector tensors. | Pixtral-style projector translation. |
+| `qwen35`, `qwen35moe` | Fixes Qwen3.5/Qwen3-VL-style text metadata and hides embedded vision/projector/MTP tensors. | Qwen3-VL merger-style projector translation. |
+| `qwen25vl` | Rewrites to upstream `qwen2vl` metadata conventions. | Qwen2.5-VL projector translation. |
+| `qwen3vl`, `qwen3vlmoe` | Adds missing Qwen3-VL metadata and hides embedded vision/projector tensors. | Qwen3-VL projector translation, including QKV merge and patch-embedding split/repack. |
+| `deepseekocr` | Rewrites to upstream `deepseek2-ocr`, injects missing OCR/MoE metadata, and hides embedded SAM/vision/projector tensors. | DeepSeek OCR projector translation. |
+| `glmocr` | Rewrites GLM OCR metadata/tensors to the upstream-compatible view. | GLM OCR projector translation. |
+| `glm4moelite` | Rewrites GLM-4.7 Flash MLA metadata to the upstream `deepseek2` path and fixes special-token metadata. | n/a |
+| `nemotron_h_moe` | Fixes latent-FFN variants and hides MTP tensors. | n/a |
+| `nemotron_h_omni` | Rewrites to the selected Nemotron text loader and hides audio/vision/projector tensors; audio remains intentionally hidden. | Nemotron V2 VL projector translation with audio disabled. |
+| `llama` legacy Llama 3 markers | Fixes legacy tokenizer metadata. | n/a |
+| `llama4` | Hides embedded vision/projector tensors from the text view. | Llama 4 projector translation. |
+| legacy `clip` projector without `clip.projector_type` | n/a | Defaults legacy LLaVA/BakLLaVA projectors to `clip.projector_type=mlp`. |
 
 Usage:
 
@@ -61,6 +103,8 @@ each loader applies its own translation.
 Additional architectures are added by implementing a `handle_<arch>()`
 and (for vision models) `handle_<arch>_clip()` in `llama-ollama-compat.cpp`
 and dispatching them from `translate_metadata` / `translate_clip_metadata`.
+For monolithic vision models, also update the `compatClipArches` allowlist in
+`llm/llama_server.go` so Ollama passes the main GGUF as `--mmproj`.
 
 ## Regenerating `upstream-edits.patch`
 
@@ -70,11 +114,7 @@ a fresh checkout and run:
 ```
 cd /path/to/llama.cpp
 git diff -- \
-    ggml/include/gguf.h \
-    ggml/src/gguf.cpp \
-    src/CMakeLists.txt \
     src/llama-model-loader.cpp \
-    src/llama-model.cpp \
     tools/mtmd/clip.cpp \
     > /path/to/ollama/llama/compat/upstream-edits.patch
 ```
@@ -84,8 +124,9 @@ git diff -- \
 Forking means tracking upstream manually. Vendoring means snapshotting all of
 llama.cpp's source in the Ollama tree (the old `llama/llama.cpp/` layout).
 This shim keeps upstream unmodified on disk and the Ollama-specific logic
-isolated in two files plus a small diff — upstream bumps are usually just
-`LLAMA_CPP_VERSION` changes.
+isolated in a few Ollama-owned source files plus a small diff — upstream bumps
+are usually just `LLAMA_CPP_VERSION` changes and, when insertion points move,
+`upstream-edits.patch` regeneration.
 
 ## Maintenance: non-public API dependencies
 
@@ -97,7 +138,7 @@ something that isn't strictly public:
 |---|---|---|
 | Direct writes to `ggml_tensor::type` / `ne[]` / `nb[]` | No sanctioned mutator exists for post-creation tensor reshape/retype. Struct is public so this works today. | Ask upstream to expose `ggml_tensor_set_{type,shape}` helpers, or introduce them in our compat util and submit a PR. |
 | `const_cast<char *>(gguf_get_tensor_name(...))` in `rename_tensor` | Pointer aims into a mutable `char[GGML_MAX_NAME]` buffer inside a `std::vector` element; the const is API hygiene. Lets us rename gguf tensors without a new public helper. | Add `gguf_rename_tensor` to `gguf.h` (10 lines) and drop the `const_cast`. |
-| `llama_model_loader` forward-decl from `src/llama-model-loader.h` | Used only as an opaque pointer key for our skip-prefix registry. Never dereferenced. | Replace with `const void *` in our registry signatures. Zero behavioral change. |
+| `llama_model_loader` forward-decl from `src/llama-model-loader.h` | Used only as an opaque pointer key for per-loader skip-prefix, mmap-disable, and source-path registries. Never dereferenced. | Replace with `const void *` in our registry signatures. Zero behavioral change. |
 
 None of these have changed in years. If an upstream bump breaks any of
 them, each has a trivial workaround. See the top of
@@ -105,14 +146,14 @@ them, each has a trivial workaround. See the top of
 
 ## Documented hacks inside per-arch handlers
 
-- **`reclaim_slot_as` (qwen35moe patch_embed split)** — repurposes an
-  orphaned `v.blk.0.attn_k` slot (left over after the QKV merge) as a
-  newly-synthesized `v.patch_embd.weight.1`. Needed because clip.cpp's
-  `ctx_meta` is sized for exactly the original tensor count (no_alloc
-  branch of `gguf_init_from_file` uses `n_tensors * ggml_tensor_overhead()`
-  with zero slack). Comment in the helper and call site explains the
-  reasoning; replacement would be a 1-line upstream patch that adds small
-  slack to the ctx size.
+- **`reclaim_slot_as` (patch-embedding splits)** — repurposes an orphaned
+  tensor slot as a newly synthesized tensor when a clip handler must split a
+  source tensor into multiple upstream-facing tensors. Needed because
+  clip.cpp's `ctx_meta` is sized for exactly the original tensor count
+  (no_alloc branch of `gguf_init_from_file` uses
+  `n_tensors * ggml_tensor_overhead()` with zero slack). Comment in the helper
+  and call sites explains the reasoning; replacement would be a small upstream
+  patch that adds slack to the ctx size.
 
 - **Load-op registry overrides `file_offset`** — `maybe_load_tensor` gets
   passed the gguf offset by its caller but ignores it when a registered
