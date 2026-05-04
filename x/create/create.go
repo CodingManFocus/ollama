@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -1291,7 +1292,7 @@ func CreateDraftSafetensorsLayers(modelDir, tensorPrefix, configPrefix, draftQua
 		if err != nil {
 			return nil, fmt.Errorf("failed to open draft %s: %w", cfgPath, err)
 		}
-		layer, err := createLayer(f, "application/vnd.ollama.image.json", filepath.Join(configPrefix, cfgPath))
+		layer, err := createLayer(f, "application/vnd.ollama.image.json", path.Join(configPrefix, cfgPath))
 		f.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create draft config layer for %s: %w", cfgPath, err)
