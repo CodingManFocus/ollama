@@ -12,8 +12,10 @@ import (
 	"github.com/ollama/ollama/x/models/nn"
 )
 
-var _ base.DraftModel = (*AssistantModel)(nil)
-var _ base.MTPDraftModel = (*AssistantModel)(nil)
+var (
+	_ base.DraftModel    = (*AssistantModel)(nil)
+	_ base.MTPDraftModel = (*AssistantModel)(nil)
+)
 
 type AssistantConfig struct {
 	TextConfig               TextConfig `json:"text_config"`
