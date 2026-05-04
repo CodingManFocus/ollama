@@ -1684,9 +1684,8 @@ func TestLaunchIntegration_EditorRepairsMissingConfigWhenSavedModelsExist(t *tes
 	writeFakeBinary(t, binDir, "droid")
 	t.Setenv("PATH", binDir)
 
-	missingPath := filepath.Join(tmpDir, "missing-settings.json")
 	editor := &launcherEditorRunner{
-		paths:  []string{missingPath},
+		paths:  nil,
 		models: nil,
 	}
 	withIntegrationOverride(t, "droid", editor)
@@ -1733,7 +1732,11 @@ func TestLaunchIntegration_EditorForceConfigure_FloatsCheckedModelsInPicker(t *t
 	writeFakeBinary(t, binDir, "droid")
 	t.Setenv("PATH", binDir)
 
-	editor := &launcherEditorRunner{}
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to seed editor settings: %v", err)
+	}
+	editor := &launcherEditorRunner{paths: []string{settingsPath}}
 	withIntegrationOverride(t, "droid", editor)
 
 	if err := config.SaveIntegration("droid", []string{"qwen3.5:cloud", "qwen3.5"}); err != nil {
@@ -1748,6 +1751,9 @@ func TestLaunchIntegration_EditorForceConfigure_FloatsCheckedModelsInPicker(t *t
 		}
 		gotPreChecked = append([]string(nil), preChecked...)
 		return []string{"qwen3.5:cloud", "qwen3.5"}, nil
+	}
+	DefaultConfirmPrompt = func(prompt string, options ConfirmOptions) (bool, error) {
+		return true, nil
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1804,7 +1810,11 @@ func TestLaunchIntegration_EditorModelOverridePreservesExtras(t *testing.T) {
 	writeFakeBinary(t, binDir, "droid")
 	t.Setenv("PATH", binDir)
 
-	editor := &launcherEditorRunner{}
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to seed editor settings: %v", err)
+	}
+	editor := &launcherEditorRunner{paths: []string{settingsPath}}
 	withIntegrationOverride(t, "droid", editor)
 
 	if err := config.SaveIntegration("droid", []string{"llama3.2", "mistral"}); err != nil {
@@ -1822,6 +1832,9 @@ func TestLaunchIntegration_EditorModelOverridePreservesExtras(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)
+	DefaultConfirmPrompt = func(prompt string, options ConfirmOptions) (bool, error) {
+		return true, nil
+	}
 
 	if err := LaunchIntegration(context.Background(), IntegrationLaunchRequest{
 		Name:          "droid",
@@ -1855,7 +1868,11 @@ func TestLaunchIntegration_EditorCloudDisabledFallsBackToSelector(t *testing.T) 
 	writeFakeBinary(t, binDir, "droid")
 	t.Setenv("PATH", binDir)
 
-	editor := &launcherEditorRunner{}
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to seed editor settings: %v", err)
+	}
+	editor := &launcherEditorRunner{paths: []string{settingsPath}}
 	withIntegrationOverride(t, "droid", editor)
 
 	if err := config.SaveIntegration("droid", []string{"glm-5:cloud"}); err != nil {
@@ -1866,6 +1883,9 @@ func TestLaunchIntegration_EditorCloudDisabledFallsBackToSelector(t *testing.T) 
 	DefaultMultiSelector = func(title string, items []ModelItem, preChecked []string) ([]string, error) {
 		multiCalled = true
 		return []string{"llama3.2"}, nil
+	}
+	DefaultConfirmPrompt = func(prompt string, options ConfirmOptions) (bool, error) {
+		return true, nil
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1902,7 +1922,11 @@ func TestLaunchIntegration_EditorConfigureMultiSkipsMissingLocalAndPersistsAccep
 	writeFakeBinary(t, binDir, "droid")
 	t.Setenv("PATH", binDir)
 
-	editor := &launcherEditorRunner{}
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to seed editor settings: %v", err)
+	}
+	editor := &launcherEditorRunner{paths: []string{settingsPath}}
 	withIntegrationOverride(t, "droid", editor)
 
 	DefaultMultiSelector = func(title string, items []ModelItem, preChecked []string) ([]string, error) {
@@ -1983,7 +2007,11 @@ func TestLaunchIntegration_EditorConfigureMultiSkipsUnauthedCloudAndPersistsAcce
 	writeFakeBinary(t, binDir, "droid")
 	t.Setenv("PATH", binDir)
 
-	editor := &launcherEditorRunner{}
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to seed editor settings: %v", err)
+	}
+	editor := &launcherEditorRunner{paths: []string{settingsPath}}
 	withIntegrationOverride(t, "droid", editor)
 
 	DefaultMultiSelector = func(title string, items []ModelItem, preChecked []string) ([]string, error) {
@@ -2230,7 +2258,11 @@ func TestLaunchIntegration_ConfiguredEditorLaunchValidatesPrimaryOnly(t *testing
 	writeFakeBinary(t, binDir, "droid")
 	t.Setenv("PATH", binDir)
 
-	editor := &launcherEditorRunner{}
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to seed editor settings: %v", err)
+	}
+	editor := &launcherEditorRunner{paths: []string{settingsPath}}
 	withIntegrationOverride(t, "droid", editor)
 
 	if err := config.SaveIntegration("droid", []string{"llama3.2", "missing-local"}); err != nil {
@@ -2351,7 +2383,11 @@ func TestLaunchIntegration_OpenclawPreservesExistingModelList(t *testing.T) {
 	writeFakeBinary(t, binDir, "openclaw")
 	t.Setenv("PATH", binDir)
 
-	editor := &launcherEditorRunner{}
+	configPath := filepath.Join(t.TempDir(), "openclaw.json")
+	if err := os.WriteFile(configPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to seed openclaw config: %v", err)
+	}
+	editor := &launcherEditorRunner{paths: []string{configPath}}
 	withIntegrationOverride(t, "openclaw", editor)
 
 	if err := config.SaveIntegration("openclaw", []string{"llama3.2", "mistral"}); err != nil {
