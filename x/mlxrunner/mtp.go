@@ -77,7 +77,7 @@ func (r *Runner) loadMTPOptions(sample bool) mtpOptions {
 	opts := mtpOptions{
 		initialDraftTokens: defaults.InitialDraftTokens,
 		maxDraftTokens:     defaults.MaxDraftTokens,
-		draftSchedule:      mtpDraftScheduleHeuristic,
+		draftSchedule:      mtpDraftScheduleConstant,
 	}
 	if v := positiveEnvInt("OLLAMA_MLX_MTP_MAX_DRAFT_TOKENS"); v > 0 {
 		opts.maxDraftTokens = v
@@ -95,10 +95,10 @@ func (r *Runner) loadMTPOptions(sample bool) mtpOptions {
 		opts.compareSerialValidate = b
 	}
 	switch schedule := strings.ToLower(strings.TrimSpace(os.Getenv("OLLAMA_MLX_MTP_DRAFT_SCHEDULE"))); schedule {
-	case "", string(mtpDraftScheduleHeuristic):
-		opts.draftSchedule = mtpDraftScheduleHeuristic
-	case string(mtpDraftScheduleConstant):
+	case "", string(mtpDraftScheduleConstant):
 		opts.draftSchedule = mtpDraftScheduleConstant
+	case string(mtpDraftScheduleHeuristic):
+		opts.draftSchedule = mtpDraftScheduleHeuristic
 	default:
 		slog.Warn("invalid MTP env setting", "key", "OLLAMA_MLX_MTP_DRAFT_SCHEDULE", "value", schedule)
 	}
@@ -220,7 +220,9 @@ func (r *Runner) runGreedyMTPDecode(ctx context.Context, request Request, sessio
 		if err != nil {
 			return err
 		}
-		generated++
+		if !done {
+			generated++
+		}
 		if done || generated >= request.Options.NumPredict {
 			break
 		}
@@ -361,7 +363,9 @@ func (r *Runner) runSampleMTPDecode(ctx context.Context, request Request, sessio
 		if err != nil {
 			return err
 		}
-		generated++
+		if !done {
+			generated++
+		}
 		if done || generated >= request.Options.NumPredict {
 			break
 		}
@@ -593,7 +597,9 @@ func (r *Runner) acceptMTPDraftsBatched(ctx context.Context, request Request, se
 		if err != nil {
 			return sampler.Result{}, accepted, done, err
 		}
-		(*generated)++
+		if !done {
+			(*generated)++
+		}
 		if done {
 			break
 		}
@@ -671,7 +677,9 @@ func (r *Runner) acceptSampleMTPDrafts(ctx context.Context, request Request, ses
 		if err != nil {
 			return sampler.Result{}, accepted, done, err
 		}
-		(*generated)++
+		if !done {
+			(*generated)++
+		}
 		if done {
 			break
 		}
@@ -874,7 +882,9 @@ func (r *Runner) acceptMTPDraftsSerial(ctx context.Context, request Request, ses
 		if err != nil {
 			return sampler.Result{}, accepted, done, err
 		}
-		(*generated)++
+		if !done {
+			(*generated)++
+		}
 		if done || *generated >= request.Options.NumPredict {
 			return sampler.Result{}, accepted, true, nil
 		}

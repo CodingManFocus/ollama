@@ -455,17 +455,17 @@ func TestMTPDraftDefaults(t *testing.T) {
 		{
 			name:        "31b quantized",
 			cfg:         &TextConfig{HiddenSize: 5376, NumHiddenLayers: 60, QuantBits: 4},
-			wantInitial: 4,
+			wantInitial: 14,
 			wantMax:     16,
 		},
 		{
-			name:        "26b moe",
+			name:        "26b-a4b moe",
 			cfg:         &TextConfig{HiddenSize: 2816, NumHiddenLayers: 30, EnableMoeBlock: true},
-			wantInitial: 4,
+			wantInitial: 8,
 			wantMax:     16,
 		},
 		{
-			name:        "e4b",
+			name:        "generic default",
 			cfg:         &TextConfig{HiddenSize: 2560, NumHiddenLayers: 42, HiddenSizePerLayer: 256},
 			wantInitial: 4,
 			wantMax:     16,

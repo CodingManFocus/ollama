@@ -480,8 +480,11 @@ func (m *Model) MTPDraftDefaults(_ bool) base.MTPDefaults {
 	if m == nil || m.TextConfig == nil {
 		return defaults
 	}
-	if !m.EnableMoeBlock && m.HiddenSize >= 5000 && m.NumHiddenLayers >= 60 && m.QuantBits == 0 {
+	switch {
+	case !m.EnableMoeBlock && m.HiddenSize == 5376 && m.NumHiddenLayers == 60:
 		defaults.InitialDraftTokens = 14
+	case m.EnableMoeBlock && m.HiddenSize == 2816 && m.NumHiddenLayers == 30:
+		defaults.InitialDraftTokens = 8
 	}
 	return defaults
 }
