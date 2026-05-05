@@ -280,6 +280,7 @@ Supported integrations:
   openclaw        OpenClaw (aliases: clawdbot, moltbot)
   pi              Pi
   pool            Pool
+  qwen            Qwen Code
   vscode          VS Code (aliases: code)
 
 Examples:
