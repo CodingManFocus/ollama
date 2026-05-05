@@ -26,8 +26,11 @@ func (c *Codex) String() string { return "Codex" }
 const codexProfileName = "ollama-launch"
 const codexCatalogFileName = "ollama-launch-models.json"
 
-func (c *Codex) args(model string, extra []string) []string {
+func (c *Codex) args(model, catalogPath string, extra []string) []string {
 	args := []string{"--profile", codexProfileName}
+	if catalogPath != "" {
+		args = append(args, "-c", fmt.Sprintf("model_catalog_json=%q", catalogPath))
+	}
 	if model != "" {
 		args = append(args, "-m", model)
 	}
@@ -40,11 +43,12 @@ func (c *Codex) Run(model string, args []string) error {
 		return err
 	}
 
-	if err := ensureCodexConfig(model); err != nil {
+	catalogPath, err := ensureCodexConfig(model)
+	if err != nil {
 		return fmt.Errorf("failed to configure codex: %w", err)
 	}
 
-	cmd := exec.Command("codex", c.args(model, args)...)
+	cmd := exec.Command("codex", c.args(model, catalogPath, args)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -54,31 +58,35 @@ func (c *Codex) Run(model string, args []string) error {
 	return cmd.Run()
 }
 
-// ensureCodexConfig writes a Codex profile and model catalog so Codex uses the
-// local Ollama server and has model metadata available.
-func ensureCodexConfig(modelName string) error {
+// ensureCodexConfig writes a minimal Codex profile plus the model catalog used
+// for Ollama-managed launches.
+func ensureCodexConfig(modelName string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	codexDir := filepath.Join(home, ".codex")
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
-		return err
+		return "", err
 	}
 
 	catalogPath := filepath.Join(codexDir, codexCatalogFileName)
 	if err := writeCodexModelCatalog(catalogPath, modelName); err != nil {
-		return err
+		return "", err
 	}
 
 	configPath := filepath.Join(codexDir, "config.toml")
-	return writeCodexProfile(configPath, catalogPath)
+	if err := writeCodexProfile(configPath); err != nil {
+		return "", err
+	}
+
+	return catalogPath, nil
 }
 
 // writeCodexProfile ensures ~/.codex/config.toml has the ollama-launch profile
 // and model provider sections with the correct base URL.
-func writeCodexProfile(configPath, catalogPath string) error {
+func writeCodexProfile(configPath string) error {
 	baseURL := envconfig.Host().String() + "/v1/"
 
 	sections := []struct {
@@ -91,7 +99,6 @@ func writeCodexProfile(configPath, catalogPath string) error {
 				fmt.Sprintf("openai_base_url = %q", baseURL),
 				`forced_login_method = "api"`,
 				fmt.Sprintf("model_provider = %q", codexProfileName),
-				fmt.Sprintf("model_catalog_json = %q", catalogPath),
 			},
 		},
 		{
