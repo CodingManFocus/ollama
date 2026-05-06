@@ -28,7 +28,7 @@ const (
 	defaultCloudProxyBaseURL      = "https://ollama.com:443"
 	defaultCloudProxySigningHost  = "ollama.com"
 	cloudProxyBaseURLEnv          = "OLLAMA_CLOUD_BASE_URL"
-	legacyCloudAnthropicKey       = "legacy_cloud_anthropic_web_search"
+	cloudAnthropicChatFallbackKey = "cloud_anthropic_chat_fallback"
 	cloudProxyClientVersionHeader = "X-Ollama-Client-Version"
 
 	// maxDecompressedBodySize limits the size of a decompressed request body
@@ -120,14 +120,13 @@ func cloudPassthroughMiddleware(disabledOperation string) gin.HandlerFunc {
 			return
 		}
 
-		// TEMP(drifkin): keep Anthropic web search requests on the local middleware
-		// path so WebSearchAnthropicWriter can orchestrate follow-up calls.
-		if c.Request.URL.Path == "/v1/messages" {
-			if hasAnthropicWebSearchTool(body) {
-				c.Set(legacyCloudAnthropicKey, true)
-				c.Next()
-				return
-			}
+		// Some Anthropic `/v1/messages` cloud requests need local normalization
+		// before they can be proxied upstream. Keep those requests on the local
+		// middleware path so they are converted into `/api/chat` first.
+		if requiresCloudAnthropicChatFallback(c.Request.URL.Path, body) {
+			c.Set(cloudAnthropicChatFallbackKey, true)
+			c.Next()
+			return
 		}
 
 		proxyCloudRequest(c, normalizedBody, disabledOperation)
@@ -156,9 +155,8 @@ func cloudModelPathPassthroughMiddleware(disabledOperation string) gin.HandlerFu
 }
 
 func proxyCloudJSONRequest(c *gin.Context, payload any, disabledOperation string) {
-	// TEMP(drifkin): we currently split out this `WithPath` method because we are
-	// mapping `/v1/messages` + web_search to `/api/chat` temporarily. Once we
-	// stop doing this, we can inline this method.
+	// Some cloud Anthropic requests are normalized locally and then proxied to
+	// a different upstream path (`/api/chat`), so we keep the `WithPath` helper.
 	proxyCloudJSONRequestWithPath(c, payload, c.Request.URL.Path, disabledOperation)
 }
 
@@ -228,13 +226,11 @@ func proxyCloudRequestWithPath(c *gin.Context, body []byte, path string, disable
 
 	var bodyWriter http.ResponseWriter = c.Writer
 	var framedWriter *jsonlFramingResponseWriter
-	// TEMP(drifkin): only needed on the cloud-proxied first leg of Anthropic
-	// web_search fallback (which is a path we're removing soon). Local
-	// /v1/messages writes one JSON value per streamResponse callback directly
-	// into WebSearchAnthropicWriter, but this proxy copy loop may coalesce
-	// multiple jsonl records into one Write.  WebSearchAnthropicWriter currently
-	// unmarshals one JSON value per Write.
-	if path == "/api/chat" && resp.StatusCode == http.StatusOK && c.GetBool(legacyCloudAnthropicKey) {
+	// Local `/v1/messages` writers expect one JSON object per Write, but the
+	// cloud proxy copy loop may coalesce multiple `/api/chat` JSONL records into
+	// one chunk. Re-split them whenever we are proxying a locally normalized
+	// Anthropic request through `/api/chat`.
+	if path == "/api/chat" && resp.StatusCode == http.StatusOK && c.GetBool(cloudAnthropicChatFallbackKey) {
 		framedWriter = &jsonlFramingResponseWriter{ResponseWriter: c.Writer}
 		bodyWriter = framedWriter
 	}
@@ -342,6 +338,76 @@ func hasAnthropicWebSearchTool(body []byte) bool {
 		if strings.HasPrefix(strings.TrimSpace(tool.Type), "web_search") {
 			return true
 		}
+	}
+
+	return false
+}
+
+func requiresCloudAnthropicChatFallback(path string, body []byte) bool {
+	if path != "/v1/messages" {
+		return false
+	}
+
+	return hasAnthropicWebSearchTool(body) || hasAnthropicToolResultImage(body)
+}
+
+func hasAnthropicToolResultImage(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+
+	var payload struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+
+	for _, message := range payload.Messages {
+		var blocks []struct {
+			Type    string          `json:"type"`
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(message.Content, &blocks); err != nil {
+			continue
+		}
+
+		for _, block := range blocks {
+			if strings.TrimSpace(block.Type) != "tool_result" {
+				continue
+			}
+			if anthropicToolResultContentHasImage(block.Content) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func anthropicToolResultContentHasImage(raw json.RawMessage) bool {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false
+	}
+
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		for _, block := range blocks {
+			if strings.TrimSpace(block.Type) == "image" {
+				return true
+			}
+		}
+	}
+
+	var block struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &block); err == nil && strings.TrimSpace(block.Type) == "image" {
+		return true
 	}
 
 	return false

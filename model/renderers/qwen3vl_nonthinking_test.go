@@ -106,6 +106,71 @@ Let me analyze this image.`,
 Let me analyze this image.`,
 		},
 		{
+			name: "tool response image",
+			msgs: []api.Message{
+				{Role: "user", Content: "Analyze this image file."},
+				{
+					Role: "assistant",
+					ToolCalls: []api.ToolCall{
+						{
+							Function: api.ToolCallFunction{
+								Name: "Read",
+								Arguments: testArgsOrdered([]orderedArg{
+									{Key: "file_path", Value: "/tmp/hello.png"},
+								}),
+							},
+						},
+					},
+				},
+				{Role: "tool", Content: "", Images: []api.ImageData{api.ImageData("img2")}},
+			},
+			expected: `<|im_start|>user
+Analyze this image file.<|im_end|>
+<|im_start|>assistant
+<tool_call>
+{"name": "Read", "arguments": {"file_path": "/tmp/hello.png"}}
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+<|vision_start|><|image_pad|><|vision_end|>
+</tool_response><|im_end|>
+<|im_start|>assistant
+`,
+		},
+		{
+			name: "tool response image with image tags",
+			msgs: []api.Message{
+				{Role: "user", Content: "Analyze this image file."},
+				{
+					Role: "assistant",
+					ToolCalls: []api.ToolCall{
+						{
+							Function: api.ToolCallFunction{
+								Name: "Read",
+								Arguments: testArgsOrdered([]orderedArg{
+									{Key: "file_path", Value: "/tmp/hello.png"},
+								}),
+							},
+						},
+					},
+				},
+				{Role: "tool", Content: "", Images: []api.ImageData{api.ImageData("img2")}},
+			},
+			useImgTags: true,
+			expected: `<|im_start|>user
+Analyze this image file.<|im_end|>
+<|im_start|>assistant
+<tool_call>
+{"name": "Read", "arguments": {"file_path": "/tmp/hello.png"}}
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+[img-0]
+</tool_response><|im_end|>
+<|im_start|>assistant
+`,
+		},
+		{
 			name: "Multiple images",
 			msgs: []api.Message{
 				{Role: "user", Content: "Describe these images.", Images: []api.ImageData{api.ImageData("img1"), api.ImageData("img2")}},

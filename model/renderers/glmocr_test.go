@@ -83,6 +83,33 @@ func TestGlmOcrRenderer_Images(t *testing.T) {
 			},
 			expected: "[gMASK]<sop><|user|>\nText only message.<|assistant|>\n",
 		},
+		{
+			name:     "tool response image uses next image offset",
+			renderer: &GlmOcrRenderer{useImgTags: true},
+			messages: []api.Message{
+				{
+					Role:    "user",
+					Content: "Analyze this image file.",
+				},
+				{
+					Role: "assistant",
+					ToolCalls: []api.ToolCall{
+						{
+							Function: api.ToolCallFunction{
+								Name:      "Read",
+								Arguments: testArgsOrdered([]orderedArg{{Key: "file_path", Value: "/tmp/hello.png"}}),
+							},
+						},
+					},
+				},
+				{
+					Role:    "tool",
+					Content: "",
+					Images:  []api.ImageData{api.ImageData("img1")},
+				},
+			},
+			expected: "[gMASK]<sop><|user|>\nAnalyze this image file.<|assistant|>\n<think></think>\n<tool_call>Read<arg_key>file_path</arg_key><arg_value>/tmp/hello.png</arg_value></tool_call>\n<|observation|>\n<tool_response>\n[img-0]\n</tool_response>\n<|assistant|>\n",
+		},
 	}
 
 	for _, tt := range tests {

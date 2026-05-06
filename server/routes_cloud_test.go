@@ -20,6 +20,8 @@ import (
 	"github.com/ollama/ollama/version"
 )
 
+const testAnthropicImageBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
 func TestStatusHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setTestHome(t, t.TempDir())
@@ -713,6 +715,154 @@ func TestExplicitCloudPassthroughAPIAndV1(t *testing.T) {
 		}
 	})
 
+	t.Run("v1 messages tool_result image fallback uses /api/chat path", func(t *testing.T) {
+		upstream, capture := newUpstream(t, `{"model":"gpt-oss:120b","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"hello"},"done":true}`)
+		defer upstream.Close()
+
+		original := cloudProxyBaseURL
+		cloudProxyBaseURL = upstream.URL
+		t.Cleanup(func() { cloudProxyBaseURL = original })
+
+		s := &Server{}
+		router, err := s.GenerateRoutes(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local := httptest.NewServer(router)
+		defer local.Close()
+
+		reqBody := `{
+				"model":"gpt-oss:120b-cloud",
+				"max_tokens":10,
+				"messages":[{
+					"role":"user",
+					"content":[{
+						"type":"tool_result",
+						"tool_use_id":"call_456",
+						"content":[
+							{"type":"text","text":"Here is the screenshot:"},
+							{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + testAnthropicImageBase64 + `"}}
+						]
+					}]
+				}],
+				"stream":false
+			}`
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, local.URL+"/v1/messages?beta=true", bytes.NewBufferString(reqBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := local.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d (%s)", resp.StatusCode, string(body))
+		}
+
+		if capture.path != "/api/chat" {
+			t.Fatalf("expected upstream path /api/chat for tool_result image fallback, got %q", capture.path)
+		}
+
+		if !strings.Contains(capture.body, `"model":"gpt-oss:120b"`) {
+			t.Fatalf("expected normalized model in upstream body, got %q", capture.body)
+		}
+
+		if !strings.Contains(capture.body, `"num_predict":10`) {
+			t.Fatalf("expected converted ollama options in upstream body, got %q", capture.body)
+		}
+
+		if !strings.Contains(capture.body, `"role":"tool"`) {
+			t.Fatalf("expected converted tool message in upstream body, got %q", capture.body)
+		}
+
+		if !strings.Contains(capture.body, `"tool_call_id":"call_456"`) {
+			t.Fatalf("expected tool_call_id in upstream body, got %q", capture.body)
+		}
+
+		if !strings.Contains(capture.body, `"images":["`+testAnthropicImageBase64+`"]`) {
+			t.Fatalf("expected image bytes in upstream body, got %q", capture.body)
+		}
+
+		if strings.Contains(capture.body, `"tool_result"`) {
+			t.Fatalf("expected anthropic tool_result block to be converted, got %q", capture.body)
+		}
+	})
+
+	t.Run("v1 messages tool_result image fallback frames coalesced jsonl chunks", func(t *testing.T) {
+		type upstreamCapture struct {
+			path string
+		}
+		capture := &upstreamCapture{}
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capture.path = r.URL.Path
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+
+			combined := strings.Join([]string{
+				`{"model":"gpt-oss:120b","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"Hel"},"done":false}`,
+				`{"model":"gpt-oss:120b","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"lo"},"done":true}`,
+			}, "\n") + "\n"
+			_, _ = w.Write([]byte(combined))
+		}))
+		defer upstream.Close()
+
+		original := cloudProxyBaseURL
+		cloudProxyBaseURL = upstream.URL
+		t.Cleanup(func() { cloudProxyBaseURL = original })
+
+		s := &Server{}
+		router, err := s.GenerateRoutes(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local := httptest.NewServer(router)
+		defer local.Close()
+
+		reqBody := `{
+					"model":"gpt-oss:120b-cloud",
+					"max_tokens":10,
+					"stream":true,
+					"messages":[{
+						"role":"user",
+						"content":[{
+							"type":"tool_result",
+							"tool_use_id":"call_456",
+							"content":[
+								{"type":"text","text":"Here is the screenshot:"},
+								{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + testAnthropicImageBase64 + `"}}
+							]
+						}]
+					}]
+				}`
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, local.URL+"/v1/messages?beta=true", bytes.NewBufferString(reqBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := local.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d (%s)", resp.StatusCode, string(body))
+		}
+		if capture.path != "/api/chat" {
+			t.Fatalf("expected upstream path /api/chat for tool_result image fallback, got %q", capture.path)
+		}
+		if !strings.Contains(string(body), "event: message_stop") {
+			t.Fatalf("expected anthropic streaming message_stop event, got body %q", string(body))
+		}
+	})
+
 	t.Run("v1 model retrieve bypasses conversion", func(t *testing.T) {
 		upstream, capture := newUpstream(t, `{"id":"kimi-k2.5:cloud","object":"model","created":1,"owned_by":"ollama"}`)
 		defer upstream.Close()
@@ -1027,6 +1177,74 @@ func TestCloudPassthroughSkipsAnthropicWebSearchLegacySuffix(t *testing.T) {
 
 	if capture.path != "" {
 		t.Fatalf("expected no passthrough for web_search requests, got upstream path %q", capture.path)
+	}
+}
+
+func TestCloudPassthroughSkipsAnthropicToolResultImages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setTestHome(t, t.TempDir())
+
+	type upstreamCapture struct {
+		path string
+	}
+	capture := &upstreamCapture{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capture.path = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message"}`))
+	}))
+	defer upstream.Close()
+
+	original := cloudProxyBaseURL
+	cloudProxyBaseURL = upstream.URL
+	t.Cleanup(func() { cloudProxyBaseURL = original })
+
+	router := gin.New()
+	router.POST(
+		"/v1/messages",
+		cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable),
+		middleware.AnthropicMessagesMiddleware(),
+		func(c *gin.Context) { c.Status(http.StatusTeapot) },
+	)
+
+	local := httptest.NewServer(router)
+	defer local.Close()
+
+	reqBody := `{
+		"model":"kimi-k2.5:cloud",
+		"max_tokens":10,
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"tool_result",
+				"tool_use_id":"call_456",
+				"content":[
+					{"type":"text","text":"Here is the screenshot:"},
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + testAnthropicImageBase64 + `"}}
+				]
+			}]
+		}]
+	}`
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, local.URL+"/v1/messages", bytes.NewBufferString(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := local.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTeapot {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected local middleware path status %d, got %d (%s)", http.StatusTeapot, resp.StatusCode, string(body))
+	}
+
+	if capture.path != "" {
+		t.Fatalf("expected no passthrough for tool_result image requests, got upstream path %q", capture.path)
 	}
 }
 
