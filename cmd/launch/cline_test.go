@@ -198,7 +198,6 @@ func TestClineModels(t *testing.T) {
 			t.Errorf("Models() = %v, want %v", models, want)
 		}
 	})
-
 }
 
 func TestClinePaths(t *testing.T) {
