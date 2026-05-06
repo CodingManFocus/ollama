@@ -868,45 +868,80 @@ func TestUserSnapshotResistsAutoMerge(t *testing.T) {
 
 func TestDecodeCheckpointsRestoreExactCachesInsideGeneratedBranch(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		env  *testEnv
+		name   string
+		newEnv func() *testEnv
 	}{
-		{name: "SlidingWindow", env: newSlidingWindowEnv()},
-		{name: "Recurrent", env: newRecurrentEnv()},
+		{name: "SlidingWindow", newEnv: newSlidingWindowEnv},
+		{name: "Recurrent", newEnv: newRecurrentEnv},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			env := tt.env
-			t.Cleanup(func() {
-				checkSnapshotLeaks(t, env.tracker, env.kvc.root)
+		for _, tc := range []struct {
+			name        string
+			matchTokens int
+			wantCached  int
+		}{
+			{name: "first checkpoint", matchTokens: 2500, wantCached: 2048},
+			{name: "second checkpoint", matchTokens: 4300, wantCached: 4096},
+		} {
+			t.Run(tt.name+"/"+tc.name, func(t *testing.T) {
+				env := tt.newEnv()
+				t.Cleanup(func() {
+					checkSnapshotLeaks(t, env.tracker, env.kvc.root)
+				})
+
+				prompt := int32Range(1, 30)
+				generated := int32Range(1000, 4600)
+				simulateRequestWithDecodeCheckpoints(t, env.kvc, prompt, generated, len(prompt))
+
+				followup := slices.Clone(prompt)
+				followup = append(followup, generated[:tc.matchTokens]...)
+				followup = append(followup, 9999)
+
+				res := simulateRequestWithDecodeCheckpoints(t, env.kvc, followup, nil)
+				wantCached := len(prompt) + tc.wantCached
+				if got, want := len(res.remaining), len(followup)-wantCached; got != want {
+					t.Fatalf("remaining = %d, want %d (restore to decode checkpoint %d)", got, want, wantCached)
+				}
+				if countEphemeralNodesAt(env.kvc, wantCached) != 1 {
+					t.Fatalf("active decode checkpoint at offset %d was pruned", wantCached)
+				}
+				env.assertAllTokens(t, "after followup", followup)
+				checkTrieInvariants(t, env.kvc.root)
 			})
-
-			prompt := int32Range(1, 30)
-			generated := int32Range(1000, 240)
-			simulateRequestWithDecodeCheckpoints(t, env.kvc, prompt, generated, len(prompt))
-
-			followup := slices.Clone(prompt)
-			followup = append(followup, generated[:80]...)
-			followup = append(followup, 9999)
-
-			res := simulateRequestWithDecodeCheckpoints(t, env.kvc, followup, nil)
-			wantCached := len(prompt) + 64
-			if got, want := len(res.remaining), len(followup)-wantCached; got != want {
-				t.Fatalf("remaining = %d, want %d (restore to decode checkpoint %d)", got, want, wantCached)
-			}
-			env.assertAllTokens(t, "after followup", followup)
-
-			deeperFollowup := slices.Clone(prompt)
-			deeperFollowup = append(deeperFollowup, generated[:150]...)
-			deeperFollowup = append(deeperFollowup, 9998)
-			res = simulateRequestWithDecodeCheckpoints(t, env.kvc, deeperFollowup, nil)
-			wantCached = len(prompt) + 128
-			if got, want := len(res.remaining), len(deeperFollowup)-wantCached; got != want {
-				t.Fatalf("deeper remaining = %d, want %d (restore to decode checkpoint %d)", got, want, wantCached)
-			}
-			env.assertAllTokens(t, "after deeper followup", deeperFollowup)
-			checkTrieInvariants(t, env.kvc.root)
-		})
+		}
 	}
+}
+
+func TestInactiveEphemeralDecodeCheckpointsArePruned(t *testing.T) {
+	env := newRecurrentEnv()
+	t.Cleanup(func() {
+		checkSnapshotLeaks(t, env.tracker, env.kvc.root)
+	})
+
+	prompt := int32Range(1, 30)
+	generated := int32Range(1000, 4200)
+	simulateRequestWithDecodeCheckpoints(t, env.kvc, prompt, generated, len(prompt))
+
+	for _, offset := range []int{len(prompt) + 2048, len(prompt) + 4096, len(prompt) + len(generated)} {
+		if countEphemeralNodesAt(env.kvc, offset) != 1 {
+			t.Fatalf("decode checkpoint at offset %d not found before cleanup", offset)
+		}
+	}
+
+	followup := append(slices.Clone(prompt), 9999)
+	simulateRequestWithDecodeCheckpoints(t, env.kvc, followup, nil)
+
+	for _, offset := range []int{len(prompt) + 2048, len(prompt) + 4096, len(prompt) + len(generated)} {
+		if countEphemeralNodesAt(env.kvc, offset) != 0 {
+			t.Fatalf("stale decode checkpoint at offset %d survived cleanup", offset)
+		}
+		if countSnapshotNodesAt(env.kvc, offset) != 0 {
+			t.Fatalf("stale decode checkpoint snapshot at offset %d survived cleanup", offset)
+		}
+	}
+	if countUserNodesAt(env.kvc, len(prompt)) != 1 {
+		t.Fatalf("durable prompt checkpoint at offset %d was pruned", len(prompt))
+	}
+	checkTrieInvariants(t, env.kvc.root)
 }
 
 func TestDecodeCheckpointsSkippedForTransformerCaches(t *testing.T) {
@@ -916,13 +951,13 @@ func TestDecodeCheckpointsSkippedForTransformerCaches(t *testing.T) {
 	})
 
 	prompt := int32Range(1, 30)
-	generated := int32Range(1000, 120)
+	generated := int32Range(1000, 2200)
 	simulateRequestWithDecodeCheckpoints(t, env.kvc, prompt, generated, len(prompt))
 
-	if countUserNodesAt(env.kvc, len(prompt)+64) != 0 {
-		t.Fatalf("unexpected decode checkpoint at offset %d for pure KV cache", len(prompt)+64)
+	if countEphemeralNodesAt(env.kvc, len(prompt)+2048) != 0 {
+		t.Fatalf("unexpected decode checkpoint at offset %d for pure KV cache", len(prompt)+2048)
 	}
-	if countUserNodesAt(env.kvc, len(prompt)+len(generated)) != 0 {
+	if countEphemeralNodesAt(env.kvc, len(prompt)+len(generated)) != 0 {
 		t.Fatalf("unexpected final decode checkpoint at offset %d for pure KV cache", len(prompt)+len(generated))
 	}
 	checkTrieInvariants(t, env.kvc.root)
@@ -938,10 +973,10 @@ func TestFinalDecodeCheckpointPreservesGeneratedTail(t *testing.T) {
 	generated := int32Range(1000, 90)
 	simulateRequestWithDecodeCheckpoints(t, env.kvc, prompt, generated, len(prompt))
 
-	if countUserNodesAt(env.kvc, len(prompt)+64) != 1 {
-		t.Fatalf("decode checkpoint at offset %d not found", len(prompt)+64)
+	if countEphemeralNodesAt(env.kvc, len(prompt)+64) != 0 {
+		t.Fatalf("unexpected periodic decode checkpoint at offset %d", len(prompt)+64)
 	}
-	if countUserNodesAt(env.kvc, len(prompt)+len(generated)) != 1 {
+	if countEphemeralNodesAt(env.kvc, len(prompt)+len(generated)) != 1 {
 		t.Fatalf("final decode checkpoint at offset %d not found", len(prompt)+len(generated))
 	}
 	checkTrieInvariants(t, env.kvc.root)
@@ -954,14 +989,14 @@ func TestDecodeCheckpointProgressStartsAtActiveFrontier(t *testing.T) {
 	})
 
 	prompt := int32Range(1, 34)
-	generated := int32Range(1000, 60)
+	generated := int32Range(1000, 2044)
 	simulateRequestWithDecodeCheckpoints(t, env.kvc, prompt, generated, 30)
 
-	if countUserNodesAt(env.kvc, 94) != 1 {
-		t.Fatalf("decode checkpoint at offset 94 not found")
+	if countEphemeralNodesAt(env.kvc, 2078) != 1 {
+		t.Fatalf("decode checkpoint at offset 2078 not found")
 	}
-	if countUserNodesAt(env.kvc, len(prompt)+64) != 0 {
-		t.Fatalf("unexpected generated-token based checkpoint at offset %d", len(prompt)+64)
+	if countEphemeralNodesAt(env.kvc, len(prompt)+2048) != 0 {
+		t.Fatalf("unexpected generated-token based checkpoint at offset %d", len(prompt)+2048)
 	}
 	checkTrieInvariants(t, env.kvc.root)
 }
@@ -970,7 +1005,7 @@ func findUserNode(t *testing.T, kvc *kvCache) *trieNode {
 	t.Helper()
 	var found *trieNode
 	walkNodes(kvc.root, func(n *trieNode) bool {
-		if n.user {
+		if n.restore == restorePointDurable {
 			found = n
 		}
 		return true
@@ -985,7 +1020,7 @@ func assertUserNodeExists(t *testing.T, kvc *kvCache, label string) {
 	t.Helper()
 	var exists bool
 	walkNodes(kvc.root, func(n *trieNode) bool {
-		if n.user {
+		if n.restore == restorePointDurable {
 			exists = true
 		}
 		return true
@@ -996,9 +1031,28 @@ func assertUserNodeExists(t *testing.T, kvc *kvCache, label string) {
 }
 
 func countUserNodesAt(kvc *kvCache, offset int) int {
+	return countRestorePointNodesAt(kvc, offset, restorePointDurable)
+}
+
+func countEphemeralNodesAt(kvc *kvCache, offset int) int {
+	return countRestorePointNodesAt(kvc, offset, restorePointEphemeral)
+}
+
+func countRestorePointNodesAt(kvc *kvCache, offset int, kind restorePointKind) int {
 	var count int
 	walkNodes(kvc.root, func(n *trieNode) bool {
-		if n.user && n.endOffset == offset {
+		if n.restore == kind && n.endOffset == offset {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+func countSnapshotNodesAt(kvc *kvCache, offset int) int {
+	var count int
+	walkNodes(kvc.root, func(n *trieNode) bool {
+		if n.endOffset == offset && n.hasSnapshots() {
 			count++
 		}
 		return true

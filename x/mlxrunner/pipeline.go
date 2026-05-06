@@ -22,19 +22,13 @@ func prefillChunkSize() int {
 	return 2 << 10
 }
 
-const minDecodeCheckpointTokens = 64
+const (
+	decodeCheckpointInterval  = 2048
+	minDecodeCheckpointTokens = 64
+)
 
 func shouldDecodeCheckpoint(generated int) bool {
-	switch {
-	case generated <= 0:
-		return false
-	case generated <= 512:
-		return generated%64 == 0
-	case generated <= 2048:
-		return generated%256 == 0
-	default:
-		return generated%1024 == 0
-	}
+	return generated > 0 && generated%decodeCheckpointInterval == 0
 }
 
 func shouldFinalDecodeCheckpoint(generated int) bool {
