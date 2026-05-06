@@ -348,10 +348,10 @@ func requiresCloudAnthropicChatFallback(path string, body []byte) bool {
 		return false
 	}
 
-	return hasAnthropicWebSearchTool(body) || hasAnthropicToolResultImage(body)
+	return hasAnthropicWebSearchTool(body) || hasAnthropicToolResultBase64Image(body)
 }
 
-func hasAnthropicToolResultImage(body []byte) bool {
+func hasAnthropicToolResultBase64Image(body []byte) bool {
 	if len(body) == 0 {
 		return false
 	}
@@ -378,7 +378,7 @@ func hasAnthropicToolResultImage(body []byte) bool {
 			if strings.TrimSpace(block.Type) != "tool_result" {
 				continue
 			}
-			if anthropicToolResultContentHasImage(block.Content) {
+			if anthropicToolResultContentHasBase64Image(block.Content) {
 				return true
 			}
 		}
@@ -387,26 +387,32 @@ func hasAnthropicToolResultImage(body []byte) bool {
 	return false
 }
 
-func anthropicToolResultContentHasImage(raw json.RawMessage) bool {
+func anthropicToolResultContentHasBase64Image(raw json.RawMessage) bool {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return false
 	}
 
 	var blocks []struct {
-		Type string `json:"type"`
+		Type   string `json:"type"`
+		Source *struct {
+			Type string `json:"type"`
+		} `json:"source"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err == nil {
 		for _, block := range blocks {
-			if strings.TrimSpace(block.Type) == "image" {
+			if strings.TrimSpace(block.Type) == "image" && block.Source != nil && strings.TrimSpace(block.Source.Type) == "base64" {
 				return true
 			}
 		}
 	}
 
 	var block struct {
-		Type string `json:"type"`
+		Type   string `json:"type"`
+		Source *struct {
+			Type string `json:"type"`
+		} `json:"source"`
 	}
-	if err := json.Unmarshal(raw, &block); err == nil && strings.TrimSpace(block.Type) == "image" {
+	if err := json.Unmarshal(raw, &block); err == nil && strings.TrimSpace(block.Type) == "image" && block.Source != nil && strings.TrimSpace(block.Source.Type) == "base64" {
 		return true
 	}
 
