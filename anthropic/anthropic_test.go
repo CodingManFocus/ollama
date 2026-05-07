@@ -413,6 +413,70 @@ func TestFromMessagesRequest_WithOutputConfigEffort(t *testing.T) {
 	}
 }
 
+func TestFromMessagesRequest_ThinkingDisabledOverridesOutputConfigEffort(t *testing.T) {
+	req := MessagesRequest{
+		Model:     "gemma4",
+		MaxTokens: 32000,
+		Messages: []MessageParam{
+			{
+				Role:    "user",
+				Content: textContent("Describe the image."),
+			},
+		},
+		Thinking: &ThinkingConfig{
+			Type: "disabled",
+		},
+		OutputConfig: &OutputConfig{
+			Effort: "high",
+		},
+	}
+
+	result, err := FromMessagesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Think == nil {
+		t.Fatal("expected think to be set")
+	}
+
+	if got := result.Think.Value; got != false {
+		t.Fatalf("expected think=false when thinking is disabled, got %v", got)
+	}
+}
+
+func TestFromMessagesRequest_ThinkingAdaptiveUsesOutputConfigEffort(t *testing.T) {
+	req := MessagesRequest{
+		Model:     "gemma4",
+		MaxTokens: 32000,
+		Messages: []MessageParam{
+			{
+				Role:    "user",
+				Content: textContent("Describe the image."),
+			},
+		},
+		Thinking: &ThinkingConfig{
+			Type: "adaptive",
+		},
+		OutputConfig: &OutputConfig{
+			Effort: "high",
+		},
+	}
+
+	result, err := FromMessagesRequest(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Think == nil {
+		t.Fatal("expected think to be set from output_config.effort")
+	}
+
+	if got := result.Think.String(); got != "high" {
+		t.Fatalf("expected think level 'high' for adaptive thinking, got %q", got)
+	}
+}
+
 func TestFromMessagesRequest_WithTools(t *testing.T) {
 	req := MessagesRequest{
 		Model:     "test-model",

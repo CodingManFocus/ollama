@@ -377,13 +377,21 @@ func FromMessagesRequest(r MessagesRequest) (*api.ChatRequest, error) {
 	}
 
 	var think *api.ThinkValue
+	normalizedEffort := ""
+	if r.OutputConfig != nil {
+		normalizedEffort = strings.ToLower(strings.TrimSpace(r.OutputConfig.Effort))
+	}
+
 	if r.Thinking != nil && r.Thinking.Type == "enabled" {
 		think = &api.ThinkValue{Value: true}
 	}
+	if r.Thinking != nil && r.Thinking.Type == "disabled" {
+		think = &api.ThinkValue{Value: false}
+	}
 	if think == nil && r.OutputConfig != nil {
-		switch strings.ToLower(strings.TrimSpace(r.OutputConfig.Effort)) {
+		switch normalizedEffort {
 		case "high", "medium", "low", "max":
-			think = &api.ThinkValue{Value: strings.ToLower(strings.TrimSpace(r.OutputConfig.Effort))}
+			think = &api.ThinkValue{Value: normalizedEffort}
 		case "none":
 			think = &api.ThinkValue{Value: false}
 		}
