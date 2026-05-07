@@ -47,24 +47,33 @@ jobs:
       matrix:
         include:
           - preset: CPU
+            server_preset: cpu
+            server_build_dir: build/llama-server-cpu
           - preset: CUDA
             container: nvidia/cuda:13.0.0-devel-ubuntu22.04
             flags: '-DCMAKE_CUDA_ARCHITECTURES=87'
+            server_preset: cuda-v13
+            server_build_dir: build/llama-server-cuda-v13
           - preset: ROCm
             container: rocm/dev-ubuntu-22.04:7.2.1
             extra-packages: rocm-libs
             flags: '-DAMDGPU_TARGETS=gfx1010 -DCMAKE_PREFIX_PATH=/opt/rocm'
+            server_preset: rocm
+            server_build_dir: build/llama-server-rocm
           - preset: Vulkan
             container: ubuntu:22.04
             extra-packages: >
               mesa-vulkan-drivers vulkan-tools
               libvulkan1 libvulkan-dev
               vulkan-sdk cmake ccache g++ make
+            server_preset: vulkan
+            server_build_dir: build/llama-server-vulkan
           - preset: 'MLX CUDA 13'
             container: nvidia/cuda:13.0.0-devel-ubuntu22.04
             extra-packages: libcudnn9-dev-cuda-13 libopenblas-dev liblapack-dev liblapacke-dev git curl
             flags: '-DCMAKE_CUDA_ARCHITECTURES=87 -DBLAS_INCLUDE_DIRS=/usr/include/x86_64-linux-gnu -DLAPACK_INCLUDE_DIRS=/usr/include/x86_64-linux-gnu'
             install-go: true
+            mlx_preset: 'MLX CUDA 13'
     runs-on: linux
     container: ${{ matrix.container }}
     steps:
@@ -100,9 +109,15 @@ jobs:
           path: /github/home/.cache/ccache
           key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ needs.changes.outputs.vendorsha }}
       - name: Build llama-server
+        if: matrix.server_preset
         run: |
-          cmake -S llama/server --preset cpu ${{ matrix.flags }}
-          cmake --build build/llama-server-cpu -- -l $(nproc)
+          cmake -S llama/server --preset "${{ matrix.server_preset }}" ${{ matrix.flags }}
+          cmake --build "${{ matrix.server_build_dir }}" -- -l $(nproc)
+      - name: Build MLX
+        if: matrix.mlx_preset
+        run: |
+          cmake --preset "${{ matrix.mlx_preset }}" ${{ matrix.flags }}
+          cmake --build --preset "${{ matrix.mlx_preset }}" -- -l $(nproc)
 
   windows:
     needs: [changes]
@@ -111,9 +126,13 @@ jobs:
       matrix:
         include:
           - preset: CPU
+            server_preset: cpu
+            server_build_dir: build\llama-server-cpu
           - preset: CUDA
             install: https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda_13.0.0_windows.exe
             flags: '-DCMAKE_CUDA_ARCHITECTURES=80'
+            server_preset: cuda-v13-windows
+            server_build_dir: build\llama-server-cuda-v13
             cuda-components:
               - '"cudart"'
               - '"nvcc"'
@@ -127,12 +146,17 @@ jobs:
             install: https://download.amd.com/developer/eula/rocm-hub/AMD-Software-PRO-Edition-26.Q1-Win11-For-HIP.exe
             rocm-version: '7.1'
             flags: '-DAMDGPU_TARGETS=gfx1010 -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_FLAGS="-parallel-jobs=4 -Wno-ignored-attributes -Wno-deprecated-pragma" -DCMAKE_CXX_FLAGS="-parallel-jobs=4 -Wno-ignored-attributes -Wno-deprecated-pragma"'
+            server_preset: rocm
+            server_build_dir: build\llama-server-rocm
           - preset: Vulkan
             install: https://sdk.lunarg.com/sdk/download/1.4.321.1/windows/vulkansdk-windows-X64-1.4.321.1.exe
+            server_preset: vulkan
+            server_build_dir: build\llama-server-vulkan
           - preset: 'MLX CUDA 13'
             install: https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda_13.0.0_windows.exe
             cudnn-install: https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.18.1.3_cuda13-archive.zip
             flags: '-DCMAKE_CUDA_ARCHITECTURES=80'
+            mlx_preset: 'MLX CUDA 13'
             cuda-components:
               - '"cudart"'
               - '"nvcc"'
@@ -235,21 +259,21 @@ jobs:
           path: ${{ github.workspace }}\.ccache
           key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ needs.changes.outputs.vendorsha }}
       - name: Build llama-server
-        if: matrix.preset != 'MLX CUDA 13'
+        if: matrix.server_preset
         run: |
           Import-Module 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
           Enter-VsDevShell -VsInstallPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' -SkipAutomaticLocation  -DevCmdArguments '-arch=x64 -no_logo'
-          cmake -S llama\server --preset cpu ${{ matrix.flags }}
-          cmake --build build\llama-server-cpu -- -l $([Environment]::ProcessorCount)
+          cmake -S llama\server --preset "${{ matrix.server_preset }}" ${{ matrix.flags }}
+          cmake --build "${{ matrix.server_build_dir }}" -- -l $([Environment]::ProcessorCount)
         env:
           CMAKE_GENERATOR: Ninja
       - name: Build MLX
-        if: matrix.preset == 'MLX CUDA 13'
+        if: matrix.mlx_preset
         run: |
           Import-Module 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
           Enter-VsDevShell -VsInstallPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' -SkipAutomaticLocation  -DevCmdArguments '-arch=x64 -no_logo'
-          cmake --preset "${{ matrix.preset }}" ${{ matrix.flags }}
-          cmake --build --preset "${{ matrix.preset }}" -- -l $([Environment]::ProcessorCount)
+          cmake --preset "${{ matrix.mlx_preset }}" ${{ matrix.flags }}
+          cmake --build --preset "${{ matrix.mlx_preset }}" -- -l $([Environment]::ProcessorCount)
         env:
           CMAKE_GENERATOR: Ninja
 
