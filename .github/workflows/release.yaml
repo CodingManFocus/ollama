@@ -278,6 +278,7 @@ jobs:
           $env:CC = "$hipPath\bin\clang.exe"
           $env:CXX = "$hipPath\bin\clang++.exe"
           cmake -S llama\server --preset rocm -G Ninja `
+              -DGGML_OPENMP=OFF `
               -DCMAKE_HIP_FLAGS="-parallel-jobs=4" `
               -DCMAKE_C_FLAGS="-parallel-jobs=4 -Wno-ignored-attributes -Wno-deprecated-pragma" `
               -DCMAKE_CXX_FLAGS="-parallel-jobs=4 -Wno-ignored-attributes -Wno-deprecated-pragma" `

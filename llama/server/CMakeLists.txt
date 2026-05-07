@@ -136,6 +136,57 @@ endif()
 
 set(_base_dest "lib/ollama")
 
+function(ollama_install_windows_runtime_dlls dest)
+    if(NOT WIN32 OR NOT GGML_BACKEND_DL)
+        return()
+    endif()
+
+    set(_runtime_dll_dirs)
+
+    if(DEFINED ENV{VCToolsRedistDir})
+        file(TO_CMAKE_PATH "$ENV{VCToolsRedistDir}" _vc_tools_redist_dir)
+        list(APPEND _runtime_dll_dirs
+            "${_vc_tools_redist_dir}/x64/Microsoft.VC143.CRT"
+            "${_vc_tools_redist_dir}/x64/Microsoft.VC143.OPENMP")
+    endif()
+
+    if(MSVC)
+        cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH _msvc_bin_dir)
+        # Walk up from the compiler bin dir to find the VC redist directory
+        # e.g. .../MSVC/14.44.35207/bin/Hostx64/x64 -> .../MSVC/14.44.35207
+        cmake_path(GET _msvc_bin_dir PARENT_PATH _tmp)
+        cmake_path(GET _tmp PARENT_PATH _tmp)
+        cmake_path(GET _tmp PARENT_PATH _msvc_ver_dir)
+        # The redist version may differ from the toolset version.
+        file(GLOB _vc_redist_dirs "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC143.CRT")
+        file(GLOB _vc_openmp_dirs "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC143.OPENMP")
+        list(APPEND _runtime_dll_dirs ${_vc_redist_dirs} ${_vc_openmp_dirs})
+    endif()
+
+    set(_runtime_dlls)
+    foreach(_dir IN LISTS _runtime_dll_dirs)
+        if(EXISTS "${_dir}")
+            file(GLOB _dlls "${_dir}/*.dll")
+            list(APPEND _runtime_dlls ${_dlls})
+        endif()
+    endforeach()
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH _clang_bin_dir)
+        file(GLOB _clang_openmp_dlls "${_clang_bin_dir}/libomp*.dll")
+        list(APPEND _runtime_dlls ${_clang_openmp_dlls})
+    endif()
+
+    if(_runtime_dlls)
+        list(REMOVE_DUPLICATES _runtime_dlls)
+        install(FILES ${_runtime_dlls}
+            DESTINATION "${dest}"
+            COMPONENT llama-server)
+    else()
+        message(WARNING "Could not find Windows runtime DLLs to bundle for ${dest}")
+    endif()
+endfunction()
+
 if(OLLAMA_RUNNER_DIR)
     # GPU backend build — install the GPU backend .so/.dll module.
     # install(CODE) runs at install time to handle both single-config and
@@ -150,6 +201,8 @@ if(OLLAMA_RUNNER_DIR)
             file(INSTALL \${_f} DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${_base_dest}/${OLLAMA_RUNNER_DIR}\")
         endforeach()
     " COMPONENT llama-server)
+
+    ollama_install_windows_runtime_dlls("${_base_dest}/${OLLAMA_RUNNER_DIR}")
 
     # Bundle GPU runtime libraries (cublas, cudart, rocblas, etc.)
     # These are needed at runtime by the GPU backend .so
@@ -216,32 +269,11 @@ else()
         RUNTIME DESTINATION ${_base_dest} COMPONENT llama-server OPTIONAL
         LIBRARY DESTINATION ${_base_dest} COMPONENT llama-server OPTIONAL)
 
-    # On Windows with /MD, bundle the MSVC CRT DLLs (vcruntime140.dll,
-    # msvcp140.dll, vcomp140.dll, etc.) alongside the executables so users
-    # don't need the VC++ Redistributable installed separately.
-    if(MSVC AND GGML_BACKEND_DL)
-        cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH _msvc_bin_dir)
-        # Walk up from the compiler bin dir to find the VC redist directory
-        # e.g. .../MSVC/14.44.35207/bin/Hostx64/x64 -> .../MSVC/14.44.35207
-        cmake_path(GET _msvc_bin_dir PARENT_PATH _tmp)
-        cmake_path(GET _tmp PARENT_PATH _tmp)
-        cmake_path(GET _tmp PARENT_PATH _msvc_ver_dir)
-        # The redist version may differ from the toolset version, so glob for it
-        file(GLOB _vc_redist_dirs "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC143.CRT")
-        file(GLOB _vc_openmp_dirs "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC143.OPENMP")
-        set(_vc_crt_dlls)
-        foreach(_dir ${_vc_redist_dirs} ${_vc_openmp_dirs})
-            file(GLOB _dlls "${_dir}/*.dll")
-            list(APPEND _vc_crt_dlls ${_dlls})
-        endforeach()
-        if(_vc_crt_dlls)
-            install(FILES ${_vc_crt_dlls}
-                DESTINATION ${_base_dest}
-                COMPONENT llama-server)
-        else()
-            message(WARNING "Could not find MSVC CRT redistributable DLLs to bundle")
-        endif()
-    endif()
+    # Bundle Windows runtime DLLs alongside the executables so zip installs
+    # do not depend on host-global redistributables. Release CI uses clang
+    # for the CPU build, which pulls in LLVM OpenMP (libomp140.x86_64.dll);
+    # local MSVC builds pull in VCOMP140.DLL from the VC redist.
+    ollama_install_windows_runtime_dlls("${_base_dest}")
 
     # CPU backend modules (multiple variants from GGML_CPU_ALL_VARIANTS).
     # install(CODE) runs at install time (not configure time) so the glob
