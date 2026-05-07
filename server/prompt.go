@@ -75,13 +75,16 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 		slog.Debug("truncating input messages which exceed context length", "truncated", len(msgs[currMsgIdx:]))
 	}
 
-	for cnt, msg := range msgs[currMsgIdx:] {
+	renderMsgs := slices.Clone(msgs)
+
+	for cnt, msg := range renderMsgs[currMsgIdx:] {
 		if slices.Contains(m.Config.ModelFamilies, "mllama") && len(msg.Images) > 1 {
 			return "", nil, errors.New("this model only supports one image while more than one image requested")
 		}
 
 		var prefix string
 		prompt := msg.Content
+		firstImageID := len(images)
 
 		for _, i := range msg.Images {
 			imgData := llm.ImageData{
@@ -101,16 +104,39 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 				prompt = strings.Replace(prompt, "[img]", imgTag, 1)
 			}
 		}
-		msgs[currMsgIdx+cnt].Content = prefix + prompt
+
+		if m.Config.Renderer != "" {
+			if len(msg.Images) > 0 {
+				renderMsgs[currMsgIdx+cnt].Content = rewriteMessageWithImageTags(prompt, firstImageID, len(msg.Images))
+				renderMsgs[currMsgIdx+cnt].Images = nil
+			}
+			continue
+		}
+
+		renderMsgs[currMsgIdx+cnt].Content = prefix + prompt
 	}
 
 	// truncate any messages that do not fit into the context window
-	p, err := renderPrompt(m, append(system, msgs[currMsgIdx:]...), tools, think)
+	p, err := renderPrompt(m, append(system, renderMsgs[currMsgIdx:]...), tools, think)
 	if err != nil {
 		return "", nil, err
 	}
 
 	return p, images, nil
+}
+
+func rewriteMessageWithImageTags(content string, firstImageID int, imageCount int) string {
+	var prefix strings.Builder
+	for i := range imageCount {
+		imgTag := fmt.Sprintf("[img-%d]", firstImageID+i)
+		if strings.Contains(content, "[img]") {
+			content = strings.Replace(content, "[img]", imgTag, 1)
+			continue
+		}
+		prefix.WriteString(imgTag)
+	}
+
+	return prefix.String() + content
 }
 
 func renderPrompt(m *Model, msgs []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
