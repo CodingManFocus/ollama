@@ -237,8 +237,8 @@ jobs:
         run: |
           Import-Module 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
           Enter-VsDevShell -VsInstallPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' -SkipAutomaticLocation  -DevCmdArguments '-arch=x64 -no_logo'
-          cmake --preset "${{ matrix.preset }}" ${{ matrix.flags }} --install-prefix "$((pwd).Path)\dist\${{ matrix.os }}-${{ matrix.arch }}"
-          cmake --build --preset "${{ matrix.preset }}" -- -l $([Environment]::ProcessorCount)
+          cmake --preset "${{ matrix.preset }}" ${{ matrix.flags }} "-DCMAKE_CUDA_FLAGS=-t 6" --install-prefix "$((pwd).Path)\dist\${{ matrix.os }}-${{ matrix.arch }}"
+          cmake --build --preset "${{ matrix.preset }}" -- -j 16
           cmake --install build --component MLX --strip
         env:
           CMAKE_GENERATOR: Ninja
