@@ -141,13 +141,14 @@ function(ollama_install_windows_runtime_dlls dest)
         return()
     endif()
 
-    set(_runtime_dll_dirs)
+    set(_runtime_dir_patterns)
 
     if(DEFINED ENV{VCToolsRedistDir})
         file(TO_CMAKE_PATH "$ENV{VCToolsRedistDir}" _vc_tools_redist_dir)
-        list(APPEND _runtime_dll_dirs
-            "${_vc_tools_redist_dir}/x64/Microsoft.VC143.CRT"
-            "${_vc_tools_redist_dir}/x64/Microsoft.VC143.OPENMP")
+        list(APPEND _runtime_dir_patterns
+            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.CRT"
+            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.OpenMP*"
+            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.OPENMP*")
     endif()
 
     if(MSVC)
@@ -158,9 +159,19 @@ function(ollama_install_windows_runtime_dlls dest)
         cmake_path(GET _tmp PARENT_PATH _tmp)
         cmake_path(GET _tmp PARENT_PATH _msvc_ver_dir)
         # The redist version may differ from the toolset version.
-        file(GLOB _vc_redist_dirs "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC143.CRT")
-        file(GLOB _vc_openmp_dirs "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC143.OPENMP")
-        list(APPEND _runtime_dll_dirs ${_vc_redist_dirs} ${_vc_openmp_dirs})
+        list(APPEND _runtime_dir_patterns
+            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.CRT"
+            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.OpenMP*"
+            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.OPENMP*")
+    endif()
+
+    set(_runtime_dll_dirs)
+    foreach(_pattern IN LISTS _runtime_dir_patterns)
+        file(GLOB _dirs LIST_DIRECTORIES true "${_pattern}")
+        list(APPEND _runtime_dll_dirs ${_dirs})
+    endforeach()
+    if(_runtime_dll_dirs)
+        list(REMOVE_DUPLICATES _runtime_dll_dirs)
     endif()
 
     set(_runtime_dlls)
