@@ -260,9 +260,10 @@ jobs:
           $cudaVer = "${{ matrix.preset }}".Replace('CUDA ', '').Replace(' ', '')
           $preset = "cuda-v$cudaVer"
           if ($cudaVer -eq "13") { $preset = "cuda-v13-windows" }
+          $buildDir = "build\llama-server-cuda-v$cudaVer"
           cmake -S llama\server --preset $preset ${{ matrix.flags }} --install-prefix "$((pwd).Path)\dist\${{ matrix.os }}-${{ matrix.arch }}"
-          cmake --build "build\llama-server-$preset" -- -l $([Environment]::ProcessorCount)
-          cmake --install "build\llama-server-$preset" --component llama-server --strip
+          cmake --build $buildDir -- -l $([Environment]::ProcessorCount)
+          cmake --install $buildDir --component llama-server --strip
         env:
           CMAKE_GENERATOR: Ninja
       - name: Build llama-server (ROCm)
