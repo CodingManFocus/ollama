@@ -56,6 +56,10 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE ${OLLAMA_BUILD_DIR})
 
 option(MLX_ENGINE "Enable MLX backend" OFF)
 if(MLX_ENGINE)
+    if(MLX_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES)
+        check_language(CUDA)
+    endif()
+
     message(STATUS "Setting up MLX (this takes a while...)")
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/x/imagegen/mlx)
 

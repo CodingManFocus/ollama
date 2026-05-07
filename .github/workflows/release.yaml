@@ -240,6 +240,8 @@ jobs:
           cmake --preset "${{ matrix.preset }}" ${{ matrix.flags }} --install-prefix "$((pwd).Path)\dist\${{ matrix.os }}-${{ matrix.arch }}"
           cmake --build --preset "${{ matrix.preset }}" -- -l $([Environment]::ProcessorCount)
           cmake --install build --component MLX --strip
+        env:
+          CMAKE_GENERATOR: Ninja
       - name: Build llama-server
         if: matrix.preset == 'CPU'
         run: |
