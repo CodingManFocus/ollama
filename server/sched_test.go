@@ -1176,6 +1176,7 @@ func TestSelectLlamaServerPlacement(t *testing.T) {
 		wantLibrary      string
 		wantMainGPU      *int
 		wantSelectedGPUs int
+		wantGPUID        string
 	}{
 		{
 			name:          "compacts onto largest same-backend GPU",
@@ -1186,8 +1187,9 @@ func TestSelectLlamaServerPlacement(t *testing.T) {
 			},
 			opts:             api.DefaultOptions(),
 			wantLibrary:      "CUDA",
-			wantMainGPU:      testIntPtr(1),
-			wantSelectedGPUs: 2,
+			wantMainGPU:      testIntPtr(0),
+			wantSelectedGPUs: 1,
+			wantGPUID:        "1",
 		},
 		{
 			name:          "explicit main gpu selects matching backend group",
@@ -1201,8 +1203,9 @@ func TestSelectLlamaServerPlacement(t *testing.T) {
 				Runner: api.Runner{MainGPU: testIntPtr(1), NumGPU: -1},
 			},
 			wantLibrary:      "ROCm",
-			wantMainGPU:      testIntPtr(1),
-			wantSelectedGPUs: 2,
+			wantMainGPU:      testIntPtr(0),
+			wantSelectedGPUs: 1,
+			wantGPUID:        "1",
 		},
 		{
 			name:          "integrated GPU is capped by system free memory",
@@ -1213,8 +1216,22 @@ func TestSelectLlamaServerPlacement(t *testing.T) {
 			},
 			opts:             api.DefaultOptions(),
 			wantLibrary:      "Metal",
-			wantMainGPU:      testIntPtr(1),
-			wantSelectedGPUs: 2,
+			wantMainGPU:      testIntPtr(0),
+			wantSelectedGPUs: 1,
+			wantGPUID:        "1",
+		},
+		{
+			name:          "prefers discrete GPU over integrated GPU with more available memory",
+			predictedVRAM: 8 * format.GigaByte,
+			gpus: []ml.DeviceInfo{
+				{DeviceID: ml.DeviceID{ID: "0", Library: "Vulkan"}, Name: "integrated", Integrated: true, FreeMemory: 32 * format.GigaByte},
+				{DeviceID: ml.DeviceID{ID: "1", Library: "Vulkan"}, Name: "discrete", FreeMemory: 10 * format.GigaByte},
+			},
+			opts:             api.DefaultOptions(),
+			wantLibrary:      "Vulkan",
+			wantMainGPU:      testIntPtr(0),
+			wantSelectedGPUs: 1,
+			wantGPUID:        "1",
 		},
 		{
 			name:          "spread disables automatic compaction",
@@ -1249,6 +1266,9 @@ func TestSelectLlamaServerPlacement(t *testing.T) {
 			selected, launchOpts := selectLlamaServerPlacement(systemInfo, tt.gpus, tt.predictedVRAM, tt.opts)
 			require.Len(t, selected, tt.wantSelectedGPUs)
 			require.Equal(t, tt.wantLibrary, selected[0].Library)
+			if tt.wantGPUID != "" {
+				require.Equal(t, tt.wantGPUID, selected[0].ID)
+			}
 			if tt.wantMainGPU == nil {
 				require.Nil(t, launchOpts.MainGPU)
 			} else {

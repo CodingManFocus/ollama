@@ -61,6 +61,7 @@ func llamaServerDiscoverDevices(ctx context.Context, libDirs []string, extraEnvs
 		"--host", "127.0.0.1",
 		"--no-webui",
 		"--offline",
+		"--verbose",
 	)
 	cmd.WaitDelay = llamaServerDiscoveryWaitDelay
 	cmd.Env = os.Environ()
@@ -137,7 +138,7 @@ func llamaServerDiscoverDevices(ctx context.Context, libDirs []string, extraEnvs
 
 	// Also run --list-devices to get the stdout device list with free memory
 	// (the brief server startup doesn't print that)
-	cmd2 := exec.CommandContext(ctx, llamaServer, "--list-devices", "--offline")
+	cmd2 := exec.CommandContext(ctx, llamaServer, "--list-devices", "--offline", "--verbose")
 	cmd2.WaitDelay = llamaServerDiscoveryWaitDelay
 	cmd2.Env = cmd.Env // reuse same environment
 	listOutput, err := cmd2.CombinedOutput()

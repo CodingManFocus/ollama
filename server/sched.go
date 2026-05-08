@@ -784,26 +784,43 @@ func selectLlamaServerPlacement(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, 
 	}
 
 	if opts.MainGPU != nil {
-		selected, ok := bestExplicitMainGPUGroup(systemInfo, groups, *opts.MainGPU)
+		gpu, available, ok := bestExplicitMainGPU(systemInfo, groups, *opts.MainGPU)
 		if !ok {
-			selected = bestGPUGroupByAvailableMemory(systemInfo, groups)
+			selected := bestGPUGroupByAvailableMemory(systemInfo, groups)
 			slog.Warn("requested main_gpu is outside the selected GPU group; passing value through to llama-server",
 				"main_gpu", *opts.MainGPU,
 				"gpu_count", len(selected))
+			logSelectedGPUGroup(gpus, selected)
+			return selected, launchOpts
 		}
+
+		selected, launchOpts := singleLlamaServerGPUPlacement(gpu, launchOpts)
+		slog.Info("selecting requested single GPU for llama-server model",
+			"requested_main_gpu", *opts.MainGPU,
+			"main_gpu", *launchOpts.MainGPU,
+			"id", gpu.ID,
+			"filter_id", gpu.FilterID,
+			"library", gpu.Library,
+			"name", gpu.Name,
+			"description", gpu.Description,
+			"integrated", gpu.Integrated,
+			"available", format.HumanBytes2(available))
 		logSelectedGPUGroup(gpus, selected)
 		return selected, launchOpts
 	}
 
 	if !envconfig.SchedSpread() && predictedVRAM > 0 {
-		selected, mainGPU, gpu, available, ok := bestSingleGPUFit(systemInfo, groups, predictedVRAM)
+		gpu, available, ok := bestSingleGPUFit(systemInfo, groups, predictedVRAM)
 		if ok {
-			launchOpts.MainGPU = &mainGPU
+			selected, launchOpts := singleLlamaServerGPUPlacement(gpu, launchOpts)
 			slog.Info("selecting single GPU for llama-server model",
-				"main_gpu", mainGPU,
+				"main_gpu", *launchOpts.MainGPU,
 				"id", gpu.ID,
+				"filter_id", gpu.FilterID,
 				"library", gpu.Library,
 				"name", gpu.Name,
+				"description", gpu.Description,
+				"integrated", gpu.Integrated,
 				"predicted", format.HumanBytes2(predictedVRAM),
 				"available", format.HumanBytes2(available))
 			logSelectedGPUGroup(gpus, selected)
@@ -816,37 +833,41 @@ func selectLlamaServerPlacement(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, 
 	return selected, launchOpts
 }
 
-func bestExplicitMainGPUGroup(systemInfo ml.SystemInfo, groups [][]ml.DeviceInfo, mainGPU int) ([]ml.DeviceInfo, bool) {
+func singleLlamaServerGPUPlacement(gpu ml.DeviceInfo, opts api.Options) ([]ml.DeviceInfo, api.Options) {
+	mainGPU := 0
+	opts.MainGPU = &mainGPU
+	return []ml.DeviceInfo{gpu}, opts
+}
+
+func bestExplicitMainGPU(systemInfo ml.SystemInfo, groups [][]ml.DeviceInfo, mainGPU int) (gpu ml.DeviceInfo, available uint64, ok bool) {
 	if mainGPU < 0 {
-		return nil, false
+		return ml.DeviceInfo{}, 0, false
 	}
 
-	var best []ml.DeviceInfo
-	var bestAvailable uint64
 	for _, group := range groups {
 		if mainGPU >= len(group) {
 			continue
 		}
-		available := availableMemoryForGPU(systemInfo, group[mainGPU])
-		if best == nil || available > bestAvailable {
-			best = group
-			bestAvailable = available
+		candidate := group[mainGPU]
+		candidateAvailable := availableMemoryForGPU(systemInfo, candidate)
+		if !ok || betterPlacementGPU(candidate, candidateAvailable, gpu, available) {
+			gpu = candidate
+			available = candidateAvailable
+			ok = true
 		}
 	}
 
-	return best, best != nil
+	return gpu, available, ok
 }
 
-func bestSingleGPUFit(systemInfo ml.SystemInfo, groups [][]ml.DeviceInfo, predictedVRAM uint64) (selected []ml.DeviceInfo, mainGPU int, gpu ml.DeviceInfo, available uint64, ok bool) {
+func bestSingleGPUFit(systemInfo ml.SystemInfo, groups [][]ml.DeviceInfo, predictedVRAM uint64) (gpu ml.DeviceInfo, available uint64, ok bool) {
 	for _, group := range groups {
-		for i, candidate := range group {
+		for _, candidate := range group {
 			candidateAvailable := availableMemoryForGPU(systemInfo, candidate)
 			if predictedVRAM > candidateAvailable*80/100 {
 				continue
 			}
-			if !ok || candidateAvailable > available {
-				selected = group
-				mainGPU = i
+			if !ok || betterPlacementGPU(candidate, candidateAvailable, gpu, available) {
 				gpu = candidate
 				available = candidateAvailable
 				ok = true
@@ -854,7 +875,15 @@ func bestSingleGPUFit(systemInfo ml.SystemInfo, groups [][]ml.DeviceInfo, predic
 		}
 	}
 
-	return selected, mainGPU, gpu, available, ok
+	return gpu, available, ok
+}
+
+func betterPlacementGPU(candidate ml.DeviceInfo, candidateAvailable uint64, current ml.DeviceInfo, currentAvailable uint64) bool {
+	if candidate.Integrated != current.Integrated {
+		return !candidate.Integrated
+	}
+
+	return candidateAvailable > currentAvailable
 }
 
 func bestGPUGroupByAvailableMemory(systemInfo ml.SystemInfo, groups [][]ml.DeviceInfo) []ml.DeviceInfo {
@@ -862,13 +891,32 @@ func bestGPUGroupByAvailableMemory(systemInfo ml.SystemInfo, groups [][]ml.Devic
 	var bestAvailable uint64
 	for _, group := range groups {
 		available, _, _ := availableMemoryForLoad(systemInfo, group)
-		if best == nil || available > bestAvailable {
+		if best == nil || betterPlacementGroup(group, available, best, bestAvailable) {
 			best = group
 			bestAvailable = available
 		}
 	}
 
 	return best
+}
+
+func betterPlacementGroup(candidate []ml.DeviceInfo, candidateAvailable uint64, current []ml.DeviceInfo, currentAvailable uint64) bool {
+	candidateDiscrete := hasDiscreteGPU(candidate)
+	currentDiscrete := hasDiscreteGPU(current)
+	if candidateDiscrete != currentDiscrete {
+		return candidateDiscrete
+	}
+
+	return candidateAvailable > currentAvailable
+}
+
+func hasDiscreteGPU(gpus []ml.DeviceInfo) bool {
+	for _, gpu := range gpus {
+		if !gpu.Integrated {
+			return true
+		}
+	}
+	return false
 }
 
 func availableMemoryForGPU(systemInfo ml.SystemInfo, gpu ml.DeviceInfo) uint64 {

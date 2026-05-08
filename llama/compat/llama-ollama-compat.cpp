@@ -28,12 +28,6 @@ using namespace llama_ollama_compat::detail; // pull detail:: helpers into scope
 
 namespace {
 
-thread_local uint64_t g_compat_info_logs = 0;
-
-void note_compat_info_log() {
-    ++g_compat_info_logs;
-}
-
 #ifdef OLLAMA_COMPAT_MTMD_BUILD
 void ollama_compat_log(const char * format, ...) {
     std::va_list args;
@@ -42,10 +36,10 @@ void ollama_compat_log(const char * format, ...) {
     va_end(args);
 }
 
-#define OLLAMA_COMPAT_LOG_INFO(...)  do { note_compat_info_log(); ollama_compat_log(__VA_ARGS__); } while (0)
+#define OLLAMA_COMPAT_LOG_INFO(...)  do { ollama_compat_log(__VA_ARGS__); } while (0)
 #define OLLAMA_COMPAT_LOG_ERROR(...) ollama_compat_log(__VA_ARGS__)
 #else
-#define OLLAMA_COMPAT_LOG_INFO(...)  do { note_compat_info_log(); LLAMA_LOG_INFO(__VA_ARGS__); } while (0)
+#define OLLAMA_COMPAT_LOG_INFO(...)  do { LLAMA_LOG_INFO(__VA_ARGS__); } while (0)
 #define OLLAMA_COMPAT_LOG_ERROR(...) LLAMA_LOG_ERROR(__VA_ARGS__)
 #endif
 
@@ -53,46 +47,22 @@ double elapsed_ms(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-class CompatScopeTimer {
-  public:
-    CompatScopeTimer(const char * phase, const std::string * arch = nullptr)
-        : phase_(phase),
-          arch_before_(arch ? *arch : ""),
-          arch_(arch),
-          log_start_(g_compat_info_logs),
-          start_(std::chrono::steady_clock::now()) {}
-
-    void force_log() {
-        forced_ = true;
-    }
-
-    ~CompatScopeTimer() {
-        const bool arch_changed = arch_ && *arch_ != arch_before_;
-        if (!forced_ && !arch_changed && g_compat_info_logs == log_start_) return;
-
-        if (arch_) {
-            if (arch_changed) {
-                OLLAMA_COMPAT_LOG_INFO("compat patch timing: phase=%s arch_before=%s arch_after=%s duration_ms=%.3f\n",
-                                       phase_, arch_before_.c_str(), arch_->c_str(), elapsed_ms(start_));
-            } else {
-                OLLAMA_COMPAT_LOG_INFO("compat patch timing: phase=%s arch=%s duration_ms=%.3f\n",
-                                       phase_, arch_->c_str(), elapsed_ms(start_));
-            }
-            return;
-        }
-
-        OLLAMA_COMPAT_LOG_INFO("compat patch timing: phase=%s duration_ms=%.3f\n",
-                               phase_, elapsed_ms(start_));
-    }
-
-  private:
-    const char * phase_;
-    std::string arch_before_;
-    const std::string * arch_;
-    uint64_t log_start_;
-    std::chrono::steady_clock::time_point start_;
-    bool forced_ = false;
+struct TransformTiming {
+    uint64_t count;
+    size_t bytes;
+    double ms;
 };
+
+std::mutex g_transform_timing_mutex;
+TransformTiming g_transform_timing = {};
+
+TransformTiming record_transform_timing(size_t bytes, double ms) {
+    std::lock_guard<std::mutex> lk(g_transform_timing_mutex);
+    g_transform_timing.count++;
+    g_transform_timing.bytes += bytes;
+    g_transform_timing.ms += ms;
+    return g_transform_timing;
+}
 
 // Per-loader file path registry — set by translate_metadata, read by
 // maybe_load_text_tensor so it can pass the path to load ops without a
@@ -2791,7 +2761,6 @@ bool translate_metadata(const llama_model_loader * ml,
                         std::string & arch_name,
                         const char * fname) {
     if (!meta) return false;
-    CompatScopeTimer timing("metadata", &arch_name);
     {
         std::lock_guard<std::mutex> lk(g_loader_path_mutex);
         g_loader_paths[ml] = fname ? fname : "";
@@ -2826,13 +2795,14 @@ bool translate_metadata(const llama_model_loader * ml,
     // Dispatch. Add more arches as they are wired up.
 
     const bool no_mmap = is_mmap_disabled_for(ml);
-    if (no_mmap) timing.force_log();
+    if (no_mmap) {
+        OLLAMA_COMPAT_LOG_INFO("compat patch disabled mmap for transformed text tensors\n");
+    }
     return no_mmap;
 }
 
 void translate_clip_metadata(gguf_context * meta, ggml_context * ctx) {
     if (!meta) return;
-    CompatScopeTimer timing("clip");
 
     handle_legacy_llava_projector(meta);
 
@@ -2921,8 +2891,11 @@ bool maybe_load_tensor(ggml_tensor * cur,
         ggml_backend_tensor_set(cur, dst.data(), 0, dst_size);
     }
 
-    OLLAMA_COMPAT_LOG_INFO("%s: %s for %s (%zu bytes) in %.3f ms\n",
-                           __func__, op.description, ggml_get_name(cur), dst_size, elapsed_ms(start));
+    const double ms = elapsed_ms(start);
+    const TransformTiming total = record_transform_timing(dst_size, ms);
+    OLLAMA_COMPAT_LOG_INFO("compat tensor transform: op=%s tensor=%s bytes=%zu duration_ms=%.3f total_ops=%llu total_bytes=%zu total_ms=%.3f\n",
+                           op.description, ggml_get_name(cur), dst_size, ms,
+                           (unsigned long long) total.count, total.bytes, total.ms);
     return true;
 }
 

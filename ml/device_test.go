@@ -13,19 +13,12 @@ func TestMergeEnvWithRunnerEnvOverrides(t *testing.T) {
 			DeviceID:           DeviceID{Library: "Metal", ID: "0"},
 			RunnerEnvOverrides: map[string]string{"GGML_METAL_TENSOR_DISABLE": "1"},
 		},
-		{
-			DeviceID: DeviceID{Library: "CUDA", ID: "3"},
-		},
 	}
 
-	env := GetDevicesEnv(devices, true)
+	env := GetDevicesEnv(devices)
 
 	if got, want := env["GGML_METAL_TENSOR_DISABLE"], "1"; got != want {
 		t.Fatalf("GGML_METAL_TENSOR_DISABLE = %q, want %q", got, want)
-	}
-
-	if got, want := env["CUDA_VISIBLE_DEVICES"], "3"; got != want {
-		t.Fatalf("CUDA_VISIBLE_DEVICES = %q, want %q", got, want)
 	}
 }
 
@@ -48,7 +41,7 @@ func TestGetDevicesEnvWarnsOnConflictingOverrides(t *testing.T) {
 		},
 	}
 
-	env := GetDevicesEnv(devices, false)
+	env := GetDevicesEnv(devices)
 
 	if got, want := env["TEST_OVERRIDE"], "two"; got != want {
 		t.Fatalf("TEST_OVERRIDE = %q, want %q", got, want)
@@ -56,6 +49,53 @@ func TestGetDevicesEnvWarnsOnConflictingOverrides(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "conflicting device environment override") {
 		t.Fatalf("expected warning log, got %q", logs.String())
+	}
+}
+
+func TestGetDevicesEnvFiltersSingleDevice(t *testing.T) {
+	tests := []struct {
+		name string
+		gpus []DeviceInfo
+		key  string
+		want string
+	}{
+		{
+			name: "single CUDA",
+			gpus: []DeviceInfo{{DeviceID: DeviceID{Library: "CUDA", ID: "3"}}},
+			key:  "CUDA_VISIBLE_DEVICES",
+			want: "3",
+		},
+		{
+			name: "multiple CUDA",
+			gpus: []DeviceInfo{
+				{DeviceID: DeviceID{Library: "CUDA", ID: "3"}},
+				{DeviceID: DeviceID{Library: "CUDA", ID: "4"}},
+			},
+			key: "CUDA_VISIBLE_DEVICES",
+		},
+		{
+			name: "single Vulkan",
+			gpus: []DeviceInfo{{DeviceID: DeviceID{Library: "Vulkan", ID: "0"}, FilterID: "1"}},
+			key:  "GGML_VK_VISIBLE_DEVICES",
+			want: "1",
+		},
+		{
+			name: "multiple Vulkan",
+			gpus: []DeviceInfo{
+				{DeviceID: DeviceID{Library: "Vulkan", ID: "0"}, FilterID: "1"},
+				{DeviceID: DeviceID{Library: "Vulkan", ID: "1"}, FilterID: "0"},
+			},
+			key: "GGML_VK_VISIBLE_DEVICES",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := GetDevicesEnv(tt.gpus)
+			if got := env[tt.key]; got != tt.want {
+				t.Fatalf("%s = %q, want %q", tt.key, got, tt.want)
+			}
+		})
 	}
 }
 

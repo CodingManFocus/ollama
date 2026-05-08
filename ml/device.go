@@ -532,12 +532,12 @@ func (f FlashAttentionType) String() string {
 
 // Given the list of GPUs this instantiation is targeted for,
 // figure out the device environment variables and any recorded
-// per-device runner environment overrides. Set mustFilter true to enable
-// filtering of CUDA devices.
-func GetDevicesEnv(l []DeviceInfo, mustFilter bool) map[string]string {
+// per-device runner environment overrides.
+func GetDevicesEnv(l []DeviceInfo) map[string]string {
 	if len(l) == 0 {
 		return nil
 	}
+	mustFilter := len(l) == 1
 	env := map[string]string{}
 	for _, d := range l {
 		d.updateVisibleDevicesEnv(env, mustFilter)
@@ -595,8 +595,12 @@ func (d DeviceInfo) updateVisibleDevicesEnv(env map[string]string, mustFilter bo
 			return
 		}
 		envVar = "CUDA_VISIBLE_DEVICES"
+	case "Vulkan":
+		if !mustFilter {
+			return
+		}
+		envVar = "GGML_VK_VISIBLE_DEVICES"
 	default:
-		// Vulkan is not filtered via env var, but via scheduling decisions
 		return
 	}
 	v, existing := env[envVar]

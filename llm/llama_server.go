@@ -601,7 +601,7 @@ func NewLlamaServerRunner(
 	memWriter := &memoryParsingWriter{inner: status}
 
 	mediaMarker := newLlamaServerMediaMarker()
-	extraEnvs := ml.GetDevicesEnv(gpus, false)
+	extraEnvs := ml.GetDevicesEnv(gpus)
 	serverEnvs := make(map[string]string, len(extraEnvs)+1)
 	for k, v := range extraEnvs {
 		serverEnvs[k] = v
