@@ -146,9 +146,7 @@ function(ollama_install_windows_runtime_dlls dest)
     if(DEFINED ENV{VCToolsRedistDir})
         file(TO_CMAKE_PATH "$ENV{VCToolsRedistDir}" _vc_tools_redist_dir)
         list(APPEND _runtime_dir_patterns
-            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.CRT"
-            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.OpenMP*"
-            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.OPENMP*")
+            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.CRT")
     endif()
 
     if(MSVC)
@@ -160,9 +158,7 @@ function(ollama_install_windows_runtime_dlls dest)
         cmake_path(GET _tmp PARENT_PATH _msvc_ver_dir)
         # The redist version may differ from the toolset version.
         list(APPEND _runtime_dir_patterns
-            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.CRT"
-            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.OpenMP*"
-            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.OPENMP*")
+            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.CRT")
     endif()
 
     set(_runtime_dll_dirs)
@@ -181,12 +177,6 @@ function(ollama_install_windows_runtime_dlls dest)
             list(APPEND _runtime_dlls ${_dlls})
         endif()
     endforeach()
-
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH _clang_bin_dir)
-        file(GLOB _clang_openmp_dlls "${_clang_bin_dir}/libomp*.dll")
-        list(APPEND _runtime_dlls ${_clang_openmp_dlls})
-    endif()
 
     if(_runtime_dlls)
         list(REMOVE_DUPLICATES _runtime_dlls)
@@ -280,10 +270,8 @@ else()
         RUNTIME DESTINATION ${_base_dest} COMPONENT llama-server OPTIONAL
         LIBRARY DESTINATION ${_base_dest} COMPONENT llama-server OPTIONAL)
 
-    # Bundle Windows runtime DLLs alongside the executables so zip installs
-    # do not depend on host-global redistributables. Release CI uses clang
-    # for the CPU build, which pulls in LLVM OpenMP (libomp140.x86_64.dll);
-    # local MSVC builds pull in VCOMP140.DLL from the VC redist.
+    # Bundle Windows CRT DLLs alongside the executables so zip installs
+    # do not depend on host-global redistributables.
     ollama_install_windows_runtime_dlls("${_base_dest}")
 
     # CPU backend modules (multiple variants from GGML_CPU_ALL_VARIANTS).

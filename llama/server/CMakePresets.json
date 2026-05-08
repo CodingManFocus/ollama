@@ -9,7 +9,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_SHARED_LIBS": "ON",
         "GGML_BACKEND_DL": "ON",
-        "GGML_NATIVE": "OFF"
+        "GGML_NATIVE": "OFF",
+        "GGML_OPENMP": "OFF"
       }
     },
     {
