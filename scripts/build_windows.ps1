@@ -122,6 +122,17 @@ function checkEnv {
     } else {
         Write-Output "Code signing disabled - please set KEY_CONTAINERS to sign and copy ollama_inc.crt to the top of the source tree"
     }
+    if (!$env:CMAKE_GENERATOR) {
+        $ninja = Get-Command -Name "ninja.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ninja) {
+            $env:CMAKE_GENERATOR = "Ninja"
+            Write-Output "Using CMake generator: Ninja"
+        } else {
+            Write-Output "Ninja not detected; using CMake default generator"
+        }
+    } else {
+        Write-Output "Using CMake generator: $env:CMAKE_GENERATOR"
+    }
     if ($env:OLLAMA_BUILD_PARALLEL) {
         $script:JOBS=[int]$env:OLLAMA_BUILD_PARALLEL
     } else {
@@ -198,6 +209,18 @@ function cuda11 {
     Write-Output "CUDA v11 is no longer supported"
 }
 
+function cudaCMakeArgs {
+    param (
+        [string]$cuda
+    )
+
+    $args = @("-DCMAKE_CUDA_COMPILER=$cuda\bin\nvcc.exe")
+    if ($env:CMAKE_GENERATOR -notlike "Ninja*") {
+        $args = @("-T", "cuda=$cuda") + $args
+    }
+    return $args
+}
+
 function cudaCommon {
     param (
         [string]$cudaMajorVer
@@ -220,7 +243,8 @@ function cudaCommon {
             # MSVC cl.exe template explosion (hangs during compilation)
             $preset = "cuda-v$cudaMajorVer"
             if ($cudaMajorVer -eq "13") { $preset = "cuda-v13-windows" }
-            & cmake -S llama\server --preset $preset -T cuda="$cuda" -DCMAKE_CUDA_COMPILER="$cuda\bin\nvcc.exe" --install-prefix "$script:DIST_DIR"
+            $cudaToolsetArgs = cudaCMakeArgs $cuda
+            & cmake -S llama\server --preset $preset @cudaToolsetArgs --install-prefix "$script:DIST_DIR"
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
             & cmake --build "build\llama-server-cuda-v$cudaMajorVer" --config Release --parallel $script:JOBS
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
@@ -362,7 +386,8 @@ function mlxCuda13 {
             if ($env:OLLAMA_CMAKE_CUDA_FLAGS) {
                 $cudaFlags += "-DCMAKE_CUDA_FLAGS=$env:OLLAMA_CMAKE_CUDA_FLAGS"
             }
-            & cmake -B build\mlx_cuda_v$cudaMajorVer --preset "MLX CUDA $cudaMajorVer" -T cuda="$cuda" @cudaFlags --install-prefix "$script:DIST_DIR"
+            $cudaToolsetArgs = cudaCMakeArgs $cuda
+            & cmake -B build\mlx_cuda_v$cudaMajorVer --preset "MLX CUDA $cudaMajorVer" @cudaToolsetArgs @cudaFlags --install-prefix "$script:DIST_DIR"
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
             & cmake --build build\mlx_cuda_v$cudaMajorVer --target mlx --target mlxc --config Release --parallel $script:JOBS -- /nodeReuse:false
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
