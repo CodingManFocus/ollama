@@ -98,7 +98,8 @@ func (r *Gemma4Renderer) Render(messages []api.Message, tools []api.Tool, thinkV
 		toolResponsesEmitted := false
 		if len(message.ToolCalls) > 0 {
 			for k := i + 1; k < len(loopMessages) && loopMessages[k].Role == "tool"; k++ {
-				sb.WriteString(r.formatToolResponseBlock(r.toolResponseName(loopMessages[k], message.ToolCalls), loopMessages[k].Content))
+				response := r.renderToolResponseContent(loopMessages[k], &imageOffset)
+				sb.WriteString(r.formatToolResponseBlock(r.toolResponseName(loopMessages[k], message.ToolCalls), response))
 				toolResponsesEmitted = true
 				prevMessageType = "tool_response"
 			}
@@ -171,6 +172,12 @@ func (r *Gemma4Renderer) renderContent(sb *strings.Builder, msg api.Message, ima
 		content = strings.TrimSpace(content)
 	}
 	sb.WriteString(content)
+}
+
+func (r *Gemma4Renderer) renderToolResponseContent(msg api.Message, imageOffset *int) string {
+	var sb strings.Builder
+	r.renderContent(&sb, msg, imageOffset, false)
+	return sb.String()
 }
 
 func (r *Gemma4Renderer) previousNonToolRole(messages []api.Message, idx int) string {

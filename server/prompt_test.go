@@ -456,6 +456,18 @@ func TestChatPromptRendererAddsToolImageTags(t *testing.T) {
 			wantUserTag:     "<|im_start|>user\n[img-0]look at this file<|im_end|>\n",
 			wantToolContent: "<tool_response>\n[img-1]attached image\n</tool_response>",
 		},
+		{
+			name:            "glm-ocr",
+			renderer:        "glm-ocr",
+			wantUserTag:     "<|user|>\n[img-0]look at this file",
+			wantToolContent: "<tool_response>\n[img-1]attached image\n</tool_response>",
+		},
+		{
+			name:            "nemotron-3-nano",
+			renderer:        "nemotron-3-nano",
+			wantUserTag:     "<|im_start|>user\n[img-0]look at this file<|im_end|>\n",
+			wantToolContent: "<tool_response>\n[img-1]attached image\n</tool_response>",
+		},
 	}
 
 	for _, tt := range tests {

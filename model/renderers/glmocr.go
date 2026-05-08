@@ -85,8 +85,10 @@ func (r *GlmOcrRenderer) Render(messages []api.Message, tools []api.Tool, thinkV
 			if i == 0 || messages[i-1].Role != "tool" {
 				sb.WriteString("<|observation|>")
 			}
+			content, nextOffset := r.renderContent(message, imageOffset)
+			imageOffset = nextOffset
 			sb.WriteString("\n<tool_response>\n")
-			sb.WriteString(message.Content)
+			sb.WriteString(content)
 			sb.WriteString("\n</tool_response>\n")
 		case "system":
 			sb.WriteString("<|system|>\n")

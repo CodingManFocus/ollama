@@ -79,12 +79,14 @@ func (r *Nemotron3NanoRenderer) Render(messages []api.Message, tools []api.Tool,
 			// Check if previous message was also a tool message
 			prevWasTool := i > 0 && loopMessages[i-1].Role == "tool"
 			nextIsTool := i+1 < len(loopMessages) && loopMessages[i+1].Role == "tool"
+			content := r.renderMessageContent(message, imageOffset)
+			imageOffset += len(message.Images)
 
 			if !prevWasTool {
 				sb.WriteString("<|im_start|>user\n")
 			}
 			sb.WriteString("<tool_response>\n")
-			sb.WriteString(message.Content)
+			sb.WriteString(content)
 			sb.WriteString("\n</tool_response>\n")
 
 			if !nextIsTool {

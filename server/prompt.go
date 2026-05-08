@@ -84,7 +84,6 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 
 		var prefix string
 		prompt := msg.Content
-		firstImageID := len(images)
 
 		for _, i := range msg.Images {
 			imgData := llm.ImageData{
@@ -106,10 +105,6 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 		}
 
 		if m.Config.Renderer != "" {
-			if len(msg.Images) > 0 {
-				renderMsgs[currMsgIdx+cnt].Content = rewriteMessageWithImageTags(prompt, firstImageID, len(msg.Images))
-				renderMsgs[currMsgIdx+cnt].Images = nil
-			}
 			continue
 		}
 
@@ -123,20 +118,6 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 	}
 
 	return p, images, nil
-}
-
-func rewriteMessageWithImageTags(content string, firstImageID int, imageCount int) string {
-	var prefix strings.Builder
-	for i := range imageCount {
-		imgTag := fmt.Sprintf("[img-%d]", firstImageID+i)
-		if strings.Contains(content, "[img]") {
-			content = strings.Replace(content, "[img]", imgTag, 1)
-			continue
-		}
-		prefix.WriteString(imgTag)
-	}
-
-	return prefix.String() + content
 }
 
 func renderPrompt(m *Model, msgs []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
