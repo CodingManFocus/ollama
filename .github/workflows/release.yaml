@@ -16,7 +16,7 @@ jobs:
     outputs:
       GOFLAGS: ${{ steps.goflags.outputs.GOFLAGS }}
       VERSION: ${{ steps.goflags.outputs.VERSION }}
-      vendorsha: ${{ steps.changes.outputs.vendorsha }}
+      vendorsha: ${{ steps.goflags.outputs.vendorsha }}
     steps:
       - uses: actions/checkout@v4
       - name: Set environment
@@ -142,6 +142,13 @@ jobs:
     env:
       GOFLAGS: ${{ needs.setup-environment.outputs.GOFLAGS }}
     steps:
+      - if: startsWith(matrix.preset, 'MLX ')
+        name: Increase pagefile to 200 GB
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 16GB
+          maximum-size: 200GB
+          disk-root: "D:"
       - name: Install system dependencies
         run: |
           choco install -y --no-progress ccache ninja
@@ -381,17 +388,33 @@ jobs:
             dist/*.ps1
             dist/OllamaSetup.exe
 
-  linux-build:
+  linux-depends:
     strategy:
       matrix:
         include:
-          - os: linux
-            arch: amd64
-            target: archive
-          - os: linux
-            arch: arm64
-            target: archive
-    runs-on: ${{ matrix.arch == 'arm64' && format('{0}-{1}', matrix.os, matrix.arch) || matrix.os }}
+          - arch: amd64
+            target: llama-server-cpu
+          - arch: amd64
+            target: llama-server-cuda-v12
+          - arch: amd64
+            target: llama-server-cuda-v13
+          - arch: amd64
+            target: mlx
+          - arch: amd64
+            target: llama-server-rocm
+          - arch: amd64
+            target: llama-server-vulkan
+          - arch: arm64
+            target: llama-server-cpu
+          - arch: arm64
+            target: llama-server-cuda-v12
+          - arch: arm64
+            target: llama-server-cuda-v13
+          - arch: arm64
+            target: jetpack-5
+          - arch: arm64
+            target: jetpack-6
+    runs-on: ${{ matrix.arch == 'arm64' && 'linux-arm64' || 'linux' }}
     environment: release
     needs: setup-environment
     env:
@@ -399,17 +422,101 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
+      - if: matrix.target == 'mlx'
+        name: Increase Linux swap to 200 GB
+        shell: bash
+        run: |
+          set -e
+          SWAP_PATH=/swapfile-mlx
+          SWAP_SIZE_GB=200
+          if [ -f "$SWAP_PATH" ]; then
+              sudo swapoff "$SWAP_PATH" 2>/dev/null || true
+              sudo rm -f "$SWAP_PATH"
+          fi
+          if ! sudo fallocate -l ${SWAP_SIZE_GB}G "$SWAP_PATH" 2>/dev/null; then
+              echo "fallocate unsupported, falling back to dd"
+              sudo dd if=/dev/zero of="$SWAP_PATH" bs=1M count=$((SWAP_SIZE_GB * 1024))
+          fi
+          sudo chmod 600 "$SWAP_PATH"
+          sudo mkswap "$SWAP_PATH"
+          sudo swapon "$SWAP_PATH"
+          swapon --show
+          free -h
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          target: ${{ matrix.target }}
+          provenance: false
+          sbom: false
+          build-args: |
+            GOFLAGS=${{ env.GOFLAGS }}
+            CGO_CFLAGS=${{ env.CGO_CFLAGS }}
+            CGO_CXXFLAGS=${{ env.CGO_CXXFLAGS }}
+            OLLAMA_MLX_BUILD_JOBS=16
+            OLLAMA_MLX_NVCC_THREADS=6
+            APT_MIRROR=http://azure.archive.ubuntu.com/ubuntu
+          cache-from: |
+            type=registry,ref=ollama/release:cache-${{ matrix.arch }}-${{ matrix.target }}
+            type=registry,ref=${{ vars.DOCKER_REPO }}:latest
+          cache-to: type=registry,ref=ollama/release:cache-${{ matrix.arch }}-${{ matrix.target }},mode=max
+
+  linux-build:
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            target: archive
+            cache-from: |
+              type=registry,ref=ollama/release:cache-amd64-llama-server-cpu
+              type=registry,ref=ollama/release:cache-amd64-llama-server-cuda-v12
+              type=registry,ref=ollama/release:cache-amd64-llama-server-cuda-v13
+              type=registry,ref=ollama/release:cache-amd64-mlx
+              type=registry,ref=ollama/release:cache-amd64-llama-server-rocm
+              type=registry,ref=ollama/release:cache-amd64-llama-server-vulkan
+              type=registry,ref=${{ vars.DOCKER_REPO }}:latest
+          - os: linux
+            arch: arm64
+            target: archive
+            cache-from: |
+              type=registry,ref=ollama/release:cache-arm64-llama-server-cpu
+              type=registry,ref=ollama/release:cache-arm64-llama-server-cuda-v12
+              type=registry,ref=ollama/release:cache-arm64-llama-server-cuda-v13
+              type=registry,ref=ollama/release:cache-arm64-jetpack-5
+              type=registry,ref=ollama/release:cache-arm64-jetpack-6
+              type=registry,ref=${{ vars.DOCKER_REPO }}:latest
+    runs-on: ${{ matrix.arch == 'arm64' && format('{0}-{1}', matrix.os, matrix.arch) || matrix.os }}
+    environment: release
+    needs: [setup-environment, linux-depends]
+    env:
+      GOFLAGS: ${{ needs.setup-environment.outputs.GOFLAGS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.os }}/${{ matrix.arch }}
           target: ${{ matrix.target }}
+          provenance: false
+          sbom: false
           build-args: |
             GOFLAGS=${{ env.GOFLAGS }}
             CGO_CFLAGS=${{ env.CGO_CFLAGS }}
             CGO_CXXFLAGS=${{ env.CGO_CXXFLAGS }}
+            OLLAMA_MLX_BUILD_JOBS=16
+            OLLAMA_MLX_NVCC_THREADS=6
           outputs: type=local,dest=dist/${{ matrix.os }}-${{ matrix.arch }}
-          cache-from: type=registry,ref=${{ vars.DOCKER_REPO }}:latest
+          cache-from: ${{ matrix.cache-from }}
           cache-to: type=inline
       - name: Deduplicate CUDA libraries
         run: |
@@ -458,6 +565,15 @@ jobs:
               CGO_CXXFLAGS
               GOFLAGS
               APT_MIRROR=http://azure.archive.ubuntu.com/ubuntu
+              OLLAMA_MLX_BUILD_JOBS=16
+              OLLAMA_MLX_NVCC_THREADS=6
+            cache-from: |
+              type=registry,ref=ollama/release:cache-arm64-llama-server-cpu
+              type=registry,ref=ollama/release:cache-arm64-llama-server-cuda-v12
+              type=registry,ref=ollama/release:cache-arm64-llama-server-cuda-v13
+              type=registry,ref=ollama/release:cache-arm64-jetpack-5
+              type=registry,ref=ollama/release:cache-arm64-jetpack-6
+              type=registry,ref=${{ vars.DOCKER_REPO }}:latest
           - os: linux
             arch: amd64
             build-args: |
@@ -465,6 +581,15 @@ jobs:
               CGO_CXXFLAGS
               GOFLAGS
               APT_MIRROR=http://azure.archive.ubuntu.com/ubuntu
+              OLLAMA_MLX_BUILD_JOBS=16
+              OLLAMA_MLX_NVCC_THREADS=6
+            cache-from: |
+              type=registry,ref=ollama/release:cache-amd64-llama-server-cpu
+              type=registry,ref=ollama/release:cache-amd64-llama-server-cuda-v12
+              type=registry,ref=ollama/release:cache-amd64-llama-server-cuda-v13
+              type=registry,ref=ollama/release:cache-amd64-mlx
+              type=registry,ref=ollama/release:cache-amd64-llama-server-vulkan
+              type=registry,ref=${{ vars.DOCKER_REPO }}:latest
           - os: linux
             arch: amd64
             suffix: '-rocm'
@@ -474,9 +599,15 @@ jobs:
               GOFLAGS
               FLAVOR=rocm
               APT_MIRROR=http://azure.archive.ubuntu.com/ubuntu
+              OLLAMA_MLX_BUILD_JOBS=16
+              OLLAMA_MLX_NVCC_THREADS=6
+            cache-from: |
+              type=registry,ref=ollama/release:cache-amd64-llama-server-cpu
+              type=registry,ref=ollama/release:cache-amd64-llama-server-rocm
+              type=registry,ref=${{ vars.DOCKER_REPO }}:latest
     runs-on: ${{ matrix.arch == 'arm64' && format('{0}-{1}', matrix.os, matrix.arch) || matrix.os }}
     environment: release
-    needs: setup-environment
+    needs: [setup-environment, linux-depends]
     env:
       GOFLAGS: ${{ needs.setup-environment.outputs.GOFLAGS }}
     steps:
@@ -491,9 +622,11 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.os }}/${{ matrix.arch }}
+          provenance: false
+          sbom: false
           build-args: ${{ matrix.build-args }}
           outputs: type=image,name=${{ vars.DOCKER_REPO }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ vars.DOCKER_REPO }}:latest
+          cache-from: ${{ matrix.cache-from }}
           cache-to: type=inline
       - run: |
           mkdir -p ${{ matrix.os }}-${{ matrix.arch }}

@@ -94,6 +94,36 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(mlx-c)
 
+# MLX CUDA builds have a long tail across many architecture variants. Using
+# higher NVCC thread counts helps, but every .cu can then spawn multiple
+# memory-heavy compiler processes. Keep those compiles in a Ninja pool sized
+# from host RAM so CI can use more threads without falling over.
+if(CMAKE_GENERATOR STREQUAL "Ninja")
+    file(GLOB_RECURSE _mlx_cu
+        "${mlx_SOURCE_DIR}/mlx/backend/cuda/*.cu"
+        "${mlx_BINARY_DIR}/mlx/backend/cuda/*.cu"
+    )
+    if(_mlx_cu)
+        set(MLX_CUDA_RAM_MB 22000 CACHE STRING
+            "Per-file memory budget in MB for the MLX CUDA compile job pool.")
+        cmake_host_system_information(RESULT _ram_mb QUERY TOTAL_PHYSICAL_MEMORY)
+        math(EXPR _cuda_pool "${_ram_mb} / ${MLX_CUDA_RAM_MB}")
+        if(_cuda_pool LESS 2)
+            set(_cuda_pool 2)
+        endif()
+        set_property(GLOBAL APPEND PROPERTY JOB_POOLS cuda_compile=${_cuda_pool})
+        list(LENGTH _mlx_cu _cu_count)
+        foreach(f ${_mlx_cu})
+            set_property(SOURCE "${f}"
+                TARGET_DIRECTORY mlx
+                PROPERTY JOB_POOL_COMPILE cuda_compile)
+        endforeach()
+        message(STATUS "MLX cuda_compile JOB_POOL: ${_cu_count} files, pool size ${_cuda_pool} (host RAM ${_ram_mb} MB / ${MLX_CUDA_RAM_MB} MB per file)")
+    else()
+        message(WARNING "MLX cuda_compile JOB_POOL: no CUDA sources found under mlx/backend/cuda")
+    endif()
+endif()
+
 # Sync vendored headers with fetched version
 file(GLOB _mlx_c_hdrs "${mlx-c_SOURCE_DIR}/mlx/c/*.h")
 file(COPY ${_mlx_c_hdrs} DESTINATION "${CMAKE_SOURCE_DIR}/x/mlxrunner/mlx/include/mlx/c/")

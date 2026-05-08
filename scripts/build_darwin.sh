@@ -71,6 +71,7 @@ _build_darwin() {
                 -DOLLAMA_RUNNER_DIR=./
             cmake --build $BUILD_DIR --target mlx mlxc -j
             cmake --install $BUILD_DIR --component MLX
+            cmake --install $BUILD_DIR --component MLX_VENDOR
             # Build llama-server statically (no Metal on x86, CPU-only)
             status "Building darwin $ARCH llama-server (static)"
             cmake -S llama/server --preset cpu \
@@ -97,6 +98,7 @@ _build_darwin() {
                 -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX
             cmake --build $BUILD_DIR --target mlx mlxc --parallel
             cmake --install $BUILD_DIR --component MLX
+            cmake --install $BUILD_DIR --component MLX_VENDOR
 
             # Metal 4.x build (NAX-enabled, macOS 26+)
             # Only possible with Xcode 26+ SDK; skip on older toolchains.
@@ -118,6 +120,7 @@ _build_darwin() {
                     -DFETCHCONTENT_SOURCE_DIR_METAL_CPP=$V3_DEPS/metal_cpp-src
                 cmake --build $BUILD_DIR_V4 --target mlx mlxc --parallel
                 cmake --install $BUILD_DIR_V4 --component MLX
+                cmake --install $BUILD_DIR_V4 --component MLX_VENDOR
             else
                 status "Skipping MLX Metal v4 (SDK $SDK_MAJOR < 26, need Xcode 26+)"
             fi

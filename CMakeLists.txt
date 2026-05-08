@@ -92,14 +92,20 @@ if(MLX_ENGINE)
         list(APPEND MLX_INCLUDE_REGEXES "^dl\\.dll$")
     endif()
 
+    # Keep mlx/mlxc targets separate from runtime dependencies so
+    # --strip only applies to the binaries we build, not vendor DLLs/libs.
     install(TARGETS mlx mlxc
-        RUNTIME_DEPENDENCIES
-            DIRECTORIES ${MLX_RUNTIME_DIRS}
-            PRE_INCLUDE_REGEXES ${MLX_INCLUDE_REGEXES}
-            PRE_EXCLUDE_REGEXES ".*"
+        RUNTIME_DEPENDENCY_SET mlx_runtime_deps
         RUNTIME DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT MLX
         LIBRARY DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT MLX
         FRAMEWORK DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT MLX
+    )
+    install(RUNTIME_DEPENDENCY_SET mlx_runtime_deps
+        DIRECTORIES ${MLX_RUNTIME_DIRS}
+        PRE_INCLUDE_REGEXES ${MLX_INCLUDE_REGEXES}
+        PRE_EXCLUDE_REGEXES ".*"
+        RUNTIME DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT MLX_VENDOR
+        LIBRARY DESTINATION ${OLLAMA_INSTALL_DIR} COMPONENT MLX_VENDOR
     )
 
     if(TARGET jaccl)
@@ -230,8 +236,7 @@ if(MLX_ENGINE)
         if(MLX_CUDA_LIBS)
             install(FILES ${MLX_CUDA_LIBS}
                 DESTINATION ${OLLAMA_INSTALL_DIR}
-                COMPONENT MLX)
+                COMPONENT MLX_VENDOR)
         endif()
     endif()
 endif()
-
