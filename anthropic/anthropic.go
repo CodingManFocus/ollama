@@ -169,6 +169,7 @@ type ImageSource struct {
 	Type      string `json:"type"` // "base64"
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 // Tool represents a tool definition
