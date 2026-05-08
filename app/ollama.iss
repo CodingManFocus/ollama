@@ -104,6 +104,9 @@ Source: "..\dist\windows-ollama-app-amd64.exe"; DestDir: "{app}"; DestName: "{#M
 #if FileExists("..\dist\windows-arm64\ollama.exe")
 Source: "..\dist\windows-arm64\ollama.exe"; DestDir: "{app}"; Check: IsArm64(); Flags: ignoreversion 64bit; BeforeInstall: TaskKill('ollama.exe')
 #endif
+#if DirExists("..\dist\windows-arm64\lib\ollama")
+Source: "..\dist\windows-arm64\lib\ollama\*"; DestDir: "{app}\lib\ollama\"; Check: IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+#endif
 
 Source: ".\assets\app.ico"; DestDir: "{app}"; Flags: ignoreversion
 

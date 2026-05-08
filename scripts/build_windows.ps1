@@ -45,6 +45,17 @@ function checkEnv {
         Write-Output "No CUDA versions detected"
     }
 
+    $arm64CC = Get-Command -Name "aarch64-w64-mingw32-gcc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $arm64CXX = Get-Command -Name "aarch64-w64-mingw32-g++.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    # TODO: support other Windows ARM64 cross-compile toolchain layouts as needed.
+    if ($arm64CC -and $arm64CXX -and $arm64CC.Path -notlike "*\clangarm64\*" -and $arm64CXX.Path -notlike "*\clangarm64\*") {
+        $script:WINDOWS_ARM64_CROSS_COMPILE = $true
+        $script:WINDOWS_ARM64_CC = $arm64CC.Path
+        $script:WINDOWS_ARM64_CXX = $arm64CXX.Path
+    } else {
+        $script:WINDOWS_ARM64_CROSS_COMPILE = $false
+    }
+
     # Locate ROCm installations
     $rocm7Dir=(get-item "C:\Program Files\AMD\ROCm\7.*" -ea 'silentlycontinue' | sort-object -Descending | select-object -First 1)
     if ($null -ne $rocm7Dir) {
@@ -145,6 +156,42 @@ function cpu {
         & cmake --install build\llama-server-cpu --component llama-server --strip
         if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
     }
+}
+
+function cpuArm64 {
+    if (-not $script:WINDOWS_ARM64_CROSS_COMPILE) {
+        Write-Output "WARNING: skipping cpuArm64; Windows ARM64 cross-compiling is disabled due to missing tools"
+        return
+    }
+
+    $arm64DistDir = "${script:SRC_DIR}\dist\windows-arm64"
+    mkdir -Force -path "${arm64DistDir}\lib\ollama\" | Out-Null
+    Remove-Item -ea 0 -recurse -force -path "${arm64DistDir}\lib\ollama"
+    New-Item "${arm64DistDir}\lib\ollama\" -ItemType Directory -ea 0 | Out-Null
+
+    # Cross-compile the Windows ARM64 CPU llama-server payload from an x64
+    # Windows host with clang-cl. GPU backends are not built for Windows ARM64.
+    $oldCC = $env:CC
+    $oldCXX = $env:CXX
+    $oldGenerator = $env:CMAKE_GENERATOR
+    $oldGeneratorPlatform = $env:CMAKE_GENERATOR_PLATFORM
+    $oldGeneratorToolset = $env:CMAKE_GENERATOR_TOOLSET
+    $env:CC = $null
+    $env:CXX = $null
+    $env:CMAKE_GENERATOR = $null
+    $env:CMAKE_GENERATOR_PLATFORM = $null
+    $env:CMAKE_GENERATOR_TOOLSET = $null
+    & cmake -S llama\server --preset cpu-arm64 --install-prefix $arm64DistDir
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    & cmake --build build\llama-server-cpu-arm64 --config Release --parallel $script:JOBS
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    & cmake --install build\llama-server-cpu-arm64 --component llama-server --strip
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    $env:CC = $oldCC
+    $env:CXX = $oldCXX
+    $env:CMAKE_GENERATOR = $oldGenerator
+    $env:CMAKE_GENERATOR_PLATFORM = $oldGeneratorPlatform
+    $env:CMAKE_GENERATOR_TOOLSET = $oldGeneratorToolset
 }
 
 function cuda11 {
@@ -311,7 +358,11 @@ function mlxCuda13 {
 
             Write-Output "Building MLX CUDA v$cudaMajorVer backend libraries $cuda"
             $env:CUDAToolkit_ROOT=$cuda
-            & cmake -B build\mlx_cuda_v$cudaMajorVer --preset "MLX CUDA $cudaMajorVer" -T cuda="$cuda" --install-prefix "$script:DIST_DIR"
+            $cudaFlags = @()
+            if ($env:OLLAMA_CMAKE_CUDA_FLAGS) {
+                $cudaFlags += "-DCMAKE_CUDA_FLAGS=$env:OLLAMA_CMAKE_CUDA_FLAGS"
+            }
+            & cmake -B build\mlx_cuda_v$cudaMajorVer --preset "MLX CUDA $cudaMajorVer" -T cuda="$cuda" @cudaFlags --install-prefix "$script:DIST_DIR"
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
             & cmake --build build\mlx_cuda_v$cudaMajorVer --target mlx --target mlxc --config Release --parallel $script:JOBS -- /nodeReuse:false
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
@@ -323,15 +374,66 @@ function mlxCuda13 {
     }
 }
 
-function ollama {
-    mkdir -Force -path "${script:DIST_DIR}\" | Out-Null
-    Write-Output "Building ollama CLI"
-    & go build -trimpath -ldflags "-s -w -X=github.com/ollama/ollama/version.Version=$script:VERSION -X=github.com/ollama/ollama/server.mode=release" .
-    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
-    cp .\ollama.exe "${script:DIST_DIR}\"
+function withWindowsArm64GoEnv {
+    param (
+        [scriptblock]$body
+    )
+    $oldGOOS = $env:GOOS
+    $oldGOARCH = $env:GOARCH
+    $oldCGO_ENABLED = $env:CGO_ENABLED
+    $oldCC = $env:CC
+    $oldCXX = $env:CXX
+    $oldPath = $env:PATH
+    $compilerDir = Split-Path -Parent $script:WINDOWS_ARM64_CC
+    try {
+        $env:GOOS = "windows"
+        $env:GOARCH = "arm64"
+        $env:CGO_ENABLED = "1"
+        $env:CC = $script:WINDOWS_ARM64_CC
+        $env:CXX = $script:WINDOWS_ARM64_CXX
+        $env:PATH = "$compilerDir;$oldPath"
+        & $body
+    } finally {
+        $env:GOOS = $oldGOOS
+        $env:GOARCH = $oldGOARCH
+        $env:CGO_ENABLED = $oldCGO_ENABLED
+        $env:CC = $oldCC
+        $env:CXX = $oldCXX
+        $env:PATH = $oldPath
+    }
 }
 
-function app {
+function buildOllamaCLI {
+    param (
+        [string]$distDir
+    )
+    mkdir -Force -path "${distDir}\" | Out-Null
+    & go build -trimpath -ldflags "-s -w -X=github.com/ollama/ollama/version.Version=$script:VERSION -X=github.com/ollama/ollama/server.mode=release" -o "${distDir}\ollama.exe" .
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+}
+
+function ollama {
+    Write-Output "Building ollama CLI"
+    buildOllamaCLI $script:DIST_DIR
+}
+
+function ollamaArm64 {
+    if (-not $script:WINDOWS_ARM64_CROSS_COMPILE) {
+        Write-Output "WARNING: skipping ollamaArm64; Windows ARM64 cross-compiling is disabled due to missing tools"
+        return
+    }
+
+    Write-Output "Building ollama CLI for arm64"
+    withWindowsArm64GoEnv {
+        buildOllamaCLI "${script:SRC_DIR}\dist\windows-arm64"
+    }
+}
+
+function prepareApp {
+    if ($script:APP_PREPARED) {
+        return
+    }
+
     Write-Output "Building Ollama App $script:VERSION with package version $script:PKG_VERSION"
 
     if (!(Get-Command npm -ErrorAction SilentlyContinue)) {
@@ -383,8 +485,33 @@ function app {
     Write-Output "Running go generate"
     & go generate ./...
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
-	& go build -trimpath -ldflags "-s -w -H windowsgui -X=github.com/ollama/ollama/app/version.Version=$script:VERSION" -o .\dist\windows-ollama-app-${script:ARCH}.exe ./app/cmd/app/
+    $script:APP_PREPARED = $true
+}
+
+function buildApp {
+    param (
+        [string]$arch
+    )
+	& go build -trimpath -ldflags "-s -w -H windowsgui -X=github.com/ollama/ollama/app/version.Version=$script:VERSION" -o .\dist\windows-ollama-app-${arch}.exe ./app/cmd/app/
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+}
+
+function app {
+    prepareApp
+    buildApp $script:ARCH
+}
+
+function appArm64 {
+    if (-not $script:WINDOWS_ARM64_CROSS_COMPILE) {
+        Write-Output "WARNING: skipping appArm64; Windows ARM64 cross-compiling is disabled due to missing tools"
+        return
+    }
+
+    prepareApp
+    Write-Output "Building Ollama App for arm64"
+    withWindowsArm64GoEnv {
+        buildApp "arm64"
+    }
 }
 
 function deps {
@@ -496,9 +623,14 @@ function zip {
             $jobs += newZipJob $amd64Dir "${distDir}\ollama-windows-amd64.zip"
         }
 
-        if (Test-Path -Path "${distDir}\windows-arm64") {
-            Write-Output "Generating ${distDir}\ollama-windows-arm64.zip"
-            $jobs += newZipJob "${distDir}\windows-arm64" "${distDir}\ollama-windows-arm64.zip"
+        $arm64Dir = "${distDir}\windows-arm64"
+        if (Test-Path -Path $arm64Dir) {
+            if ((Test-Path -Path "${arm64Dir}\ollama.exe") -and (Test-Path -Path "${arm64Dir}\lib\ollama\llama-server.exe")) {
+                Write-Output "Generating ${distDir}\ollama-windows-arm64.zip"
+                $jobs += newZipJob $arm64Dir "${distDir}\ollama-windows-arm64.zip"
+            } else {
+                Write-Output "Skipping ${distDir}\ollama-windows-arm64.zip; missing ARM64 ollama.exe or llama-server.exe"
+            }
         }
 
         if ($jobs.Count -gt 0) {
@@ -538,6 +670,9 @@ try {
         mlxCuda13
         ollama
         app
+        cpuArm64
+        ollamaArm64
+        appArm64
         deps
         sign
         installer

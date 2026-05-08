@@ -23,6 +23,20 @@
       }
     },
     {
+      "name": "cpu-arm64",
+      "inherits": ["default"],
+      "generator": "Visual Studio 17 2022",
+      "architecture": "ARM64",
+      "toolset": "ClangCL",
+      "binaryDir": "${sourceDir}/../../build/llama-server-cpu-arm64",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_PROCESSOR": "ARM64",
+        "GGML_CPU_ALL_VARIANTS": "OFF",
+        "OLLAMA_RUNNER_DIR": "",
+        "OLLAMA_WINDOWS_RUNTIME_ARCH": "arm64"
+      }
+    },
+    {
       "name": "darwin",
       "inherits": ["default"],
       "binaryDir": "${sourceDir}/../../build/llama-server-darwin",
@@ -119,6 +133,11 @@
     {
       "name": "cpu",
       "configurePreset": "cpu",
+      "targets": ["llama-server", "llama-quantize", "ggml-cpu"]
+    },
+    {
+      "name": "cpu-arm64",
+      "configurePreset": "cpu-arm64",
       "targets": ["llama-server", "llama-quantize", "ggml-cpu"]
     },
     {

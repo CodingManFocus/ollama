@@ -141,12 +141,24 @@ function(ollama_install_windows_runtime_dlls dest)
         return()
     endif()
 
+    set(_ollama_windows_runtime_arch "x64")
+    if(DEFINED OLLAMA_WINDOWS_RUNTIME_ARCH)
+        set(_ollama_windows_runtime_arch "${OLLAMA_WINDOWS_RUNTIME_ARCH}")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+        set(_ollama_windows_runtime_arch "arm64")
+    endif()
+
     set(_runtime_dir_patterns)
 
     if(DEFINED ENV{VCToolsRedistDir})
         file(TO_CMAKE_PATH "$ENV{VCToolsRedistDir}" _vc_tools_redist_dir)
         list(APPEND _runtime_dir_patterns
-            "${_vc_tools_redist_dir}/x64/Microsoft.VC*.CRT")
+            "${_vc_tools_redist_dir}/${_ollama_windows_runtime_arch}/Microsoft.VC*.CRT")
+    endif()
+
+    if(CMAKE_GENERATOR_INSTANCE)
+        list(APPEND _runtime_dir_patterns
+            "${CMAKE_GENERATOR_INSTANCE}/VC/Redist/MSVC/*/${_ollama_windows_runtime_arch}/Microsoft.VC*.CRT")
     endif()
 
     if(MSVC)
@@ -158,7 +170,7 @@ function(ollama_install_windows_runtime_dlls dest)
         cmake_path(GET _tmp PARENT_PATH _msvc_ver_dir)
         # The redist version may differ from the toolset version.
         list(APPEND _runtime_dir_patterns
-            "${_msvc_ver_dir}/../../../Redist/MSVC/*/x64/Microsoft.VC*.CRT")
+            "${_msvc_ver_dir}/../../../Redist/MSVC/*/${_ollama_windows_runtime_arch}/Microsoft.VC*.CRT")
     endif()
 
     set(_runtime_dll_dirs)
