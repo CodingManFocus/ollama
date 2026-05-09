@@ -11,6 +11,60 @@ $ErrorActionPreference = "Continue"
 
 mkdir -Force -path .\dist | Out-Null
 
+function findVisualStudioInstall {
+    if ($env:VSINSTALLDIR -and (Test-Path $env:VSINSTALLDIR)) {
+        return $env:VSINSTALLDIR
+    }
+
+    $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+    if ($programFilesX86) {
+        $vswhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vswhere) {
+            $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1
+            if ($install) {
+                return $install
+            }
+        }
+    }
+
+    $instance = Get-CimInstance MSFT_VSInstance -Namespace root/cimv2/vs -ErrorAction SilentlyContinue | Sort-Object -Property Version -Descending | Select-Object -First 1
+    if ($instance) {
+        return $instance.InstallLocation
+    }
+
+    return $null
+}
+
+function enableMsvcForNinja {
+    if ($env:CMAKE_GENERATOR -notlike "Ninja*") {
+        return
+    }
+
+    if (-not (Get-Command -Name "cl.exe" -ErrorAction SilentlyContinue)) {
+        $vsInstall = findVisualStudioInstall
+        if ($vsInstall) {
+            $devShell = Join-Path $vsInstall "Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+            if (Test-Path $devShell) {
+                Import-Module $devShell
+                Enter-VsDevShell -VsInstallPath $vsInstall -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -no_logo"
+            }
+        }
+    }
+
+    if (-not (Get-Command -Name "cl.exe" -ErrorAction SilentlyContinue)) {
+        Write-Error "Ninja builds require MSVC cl.exe. Install Visual Studio C++ tools or run from a VS Developer shell."
+        exit(1)
+    }
+
+    if (-not $env:CC) {
+        $env:CC = "cl.exe"
+    }
+    if (-not $env:CXX) {
+        $env:CXX = "cl.exe"
+    }
+    Write-Output "Using MSVC with Ninja: CC=$env:CC CXX=$env:CXX"
+}
+
 function checkEnv {
     if ($null -ne $env:ARCH ) {
         $script:ARCH = $env:ARCH
@@ -133,6 +187,7 @@ function checkEnv {
     } else {
         Write-Output "Using CMake generator: $env:CMAKE_GENERATOR"
     }
+    enableMsvcForNinja
     if ($env:OLLAMA_BUILD_PARALLEL) {
         $script:JOBS=[int]$env:OLLAMA_BUILD_PARALLEL
     } else {
@@ -214,11 +269,11 @@ function cudaCMakeArgs {
         [string]$cuda
     )
 
-    $args = @("-DCMAKE_CUDA_COMPILER=$cuda\bin\nvcc.exe")
-    if ($env:CMAKE_GENERATOR -notlike "Ninja*") {
-        $args = @("-T", "cuda=$cuda") + $args
+    $env:CUDACXX = "$cuda\bin\nvcc.exe"
+    if ($env:CMAKE_GENERATOR -like "Ninja*") {
+        return @()
     }
-    return $args
+    return @("-T", "cuda=$cuda", "-DCMAKE_CUDA_COMPILER=$cuda\bin\nvcc.exe")
 }
 
 function cudaCommon {
@@ -244,7 +299,8 @@ function cudaCommon {
             $preset = "cuda-v$cudaMajorVer"
             if ($cudaMajorVer -eq "13") { $preset = "cuda-v13-windows" }
             $cudaToolsetArgs = cudaCMakeArgs $cuda
-            & cmake -S llama\server --preset $preset @cudaToolsetArgs --install-prefix "$script:DIST_DIR"
+            $configureArgs = @("-S", "llama\server", "--preset", $preset) + $cudaToolsetArgs + @("--install-prefix", "$script:DIST_DIR")
+            & cmake @configureArgs
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
             & cmake --build "build\llama-server-cuda-v$cudaMajorVer" --config Release --parallel $script:JOBS
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
@@ -290,6 +346,11 @@ function rocm7 {
                 $NINJA_DIR=(gci -path (Get-CimInstance MSFT_VSInstance -Namespace root/cimv2/vs)[0].InstallLocation -r -fi ninja.exe).Directory.FullName
                 $env:PATH="$NINJA_DIR;$env:PATH"
             }
+            $oldHIPCXX = $env:HIPCXX
+            $oldHIP_PLATFORM = $env:HIP_PLATFORM
+            $oldCMAKE_PREFIX_PATH = $env:CMAKE_PREFIX_PATH
+            $oldCC = $env:CC
+            $oldCXX = $env:CXX
             $env:HIPCXX="${script:HIP_PATH_V7}\bin\clang++.exe"
             $env:HIP_PLATFORM="amd"
             $env:CMAKE_PREFIX_PATH="${script:HIP_PATH_V7}"
@@ -305,11 +366,11 @@ function rocm7 {
                 -DAMDGPU_TARGETS="gfx942;gfx950;gfx1010;gfx1012;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1200;gfx1201;gfx908:xnack-;gfx90a:xnack+;gfx90a:xnack-" `
                 --install-prefix $script:DIST_DIR
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
-            $env:HIPCXX=""
-            $env:HIP_PLATFORM=""
-            $env:CMAKE_PREFIX_PATH=""
-            $env:CC=""
-            $env:CXX=""
+            $env:HIPCXX=$oldHIPCXX
+            $env:HIP_PLATFORM=$oldHIP_PLATFORM
+            $env:CMAKE_PREFIX_PATH=$oldCMAKE_PREFIX_PATH
+            $env:CC=$oldCC
+            $env:CXX=$oldCXX
             & cmake --build build\llama-server-rocm --config Release --parallel $script:JOBS
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
             & cmake --install build\llama-server-rocm --component llama-server --strip
@@ -387,9 +448,14 @@ function mlxCuda13 {
                 $cudaFlags += "-DCMAKE_CUDA_FLAGS=$env:OLLAMA_CMAKE_CUDA_FLAGS"
             }
             $cudaToolsetArgs = cudaCMakeArgs $cuda
-            & cmake -B build\mlx_cuda_v$cudaMajorVer --preset "MLX CUDA $cudaMajorVer" @cudaToolsetArgs @cudaFlags --install-prefix "$script:DIST_DIR"
+            $configureArgs = @("-B", "build\mlx_cuda_v$cudaMajorVer", "--preset", "MLX CUDA $cudaMajorVer") + $cudaToolsetArgs + $cudaFlags + @("--install-prefix", "$script:DIST_DIR")
+            & cmake @configureArgs
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
-            & cmake --build build\mlx_cuda_v$cudaMajorVer --target mlx --target mlxc --config Release --parallel $script:JOBS -- /nodeReuse:false
+            $buildArgs = @("--build", "build\mlx_cuda_v$cudaMajorVer", "--target", "mlx", "--target", "mlxc", "--config", "Release", "--parallel", "$script:JOBS")
+            if ($env:CMAKE_GENERATOR -notlike "Ninja*") {
+                $buildArgs += @("--", "/nodeReuse:false")
+            }
+            & cmake @buildArgs
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
             & cmake --install build\mlx_cuda_v$cudaMajorVer --component "MLX" --strip
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
