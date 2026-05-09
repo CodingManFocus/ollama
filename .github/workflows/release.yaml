@@ -259,46 +259,24 @@ jobs:
           path: dist\*
 
   windows-build:
-    strategy:
-      matrix:
-        os: [windows]
-        arch: [amd64, arm64]
-        include:
-        - os: windows
-          arch: amd64
-          llvmarch: x86_64
-        - os: windows
-          arch: arm64
-          llvmarch: aarch64
-    runs-on: ${{ matrix.arch == 'arm64' && format('{0}-{1}', matrix.os, matrix.arch) || matrix.os }}
+    runs-on: windows
     environment: release
     needs: [setup-environment]
     env:
       GOFLAGS: ${{ needs.setup-environment.outputs.GOFLAGS }}
       VERSION: ${{ needs.setup-environment.outputs.VERSION }}
     steps:
-      - name: Install ARM64 system dependencies
-        if: matrix.arch == 'arm64'
-        run: |
-          $ErrorActionPreference = "Stop"
-          Set-ExecutionPolicy Bypass -Scope Process -Force
-          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          echo "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-          Invoke-WebRequest -Uri https://aka.ms/vs/17/release/vc_redist.arm64.exe -OutFile "${{ runner.temp }}\vc_redist.arm64.exe"
-          Start-Process -FilePath "${{ runner.temp }}\vc_redist.arm64.exe" -ArgumentList @("/install", "/quiet", "/norestart") -NoNewWindow -Wait
-
-          choco install -y --no-progress git gzip
-          echo "C:\Program Files\Git\cmd" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install clang and gcc-compat
         run: |
           $ErrorActionPreference = "Stop"
           Set-ExecutionPolicy Bypass -Scope Process -Force
-          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-ucrt-${{ matrix.llvmarch }}.zip" -OutFile "${{ runner.temp }}\llvm-mingw-ucrt.zip"
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-ucrt-x86_64.zip" -OutFile "${{ runner.temp }}\llvm-mingw-ucrt.zip"
           Expand-Archive -Path ${{ runner.temp }}\llvm-mingw-ucrt.zip -DestinationPath "C:\Program Files\"
-          $installPath=(Resolve-Path -Path "C:\Program Files\llvm-mingw-*-ucrt*").path
+          $installPath=(Resolve-Path -Path "C:\Program Files\llvm-mingw-*-ucrt-x86_64").path
           echo "$installPath\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (!(Test-Path "$installPath\bin\aarch64-w64-mingw32-gcc.exe")) {
+            throw "llvm-mingw x86_64 package is missing the aarch64 cross compiler"
+          }
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
@@ -322,13 +300,24 @@ jobs:
         with:
           node-version: "20"
       - run: |
-          ./scripts/build_windows ollama app
+          ./scripts/build_windows ollama ollamaArm64 app appArm64
+      - name: Verify Windows build payloads
+        run: |
+          $expected = @(
+            ".\dist\windows-amd64\ollama.exe",
+            ".\dist\windows-arm64\ollama.exe"
+          )
+          foreach ($payload in $expected) {
+            if (!(Test-Path $payload)) {
+              throw "Missing expected Windows build payload: $payload"
+            }
+          }
       - name: Log build results
         run: |
           gci -path .\dist -Recurse -File | ForEach-Object { get-filehash -path $_.FullName -Algorithm SHA256 } | format-list
       - uses: actions/upload-artifact@v4
         with:
-          name: build-${{ matrix.os }}-${{ matrix.arch }}
+          name: build-windows-amd64
           path: |
             dist\*
 

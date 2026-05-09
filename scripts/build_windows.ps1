@@ -35,7 +35,7 @@ function findVisualStudioInstall {
     return $null
 }
 
-function enableMsvcForNinja {
+function ensureMsvcForNinja {
     if ($env:CMAKE_GENERATOR -notlike "Ninja*") {
         return
     }
@@ -55,14 +55,7 @@ function enableMsvcForNinja {
         Write-Error "Ninja builds require MSVC cl.exe. Install Visual Studio C++ tools or run from a VS Developer shell."
         exit(1)
     }
-
-    if (-not $env:CC) {
-        $env:CC = "cl.exe"
-    }
-    if (-not $env:CXX) {
-        $env:CXX = "cl.exe"
-    }
-    Write-Output "Using MSVC with Ninja: CC=$env:CC CXX=$env:CXX"
+    Write-Output "MSVC cl.exe available for Ninja builds"
 }
 
 function checkEnv {
@@ -99,13 +92,20 @@ function checkEnv {
         Write-Output "No CUDA versions detected"
     }
 
-    $arm64CC = Get-Command -Name "aarch64-w64-mingw32-gcc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    $arm64CXX = Get-Command -Name "aarch64-w64-mingw32-g++.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $arm64CCPath = (Get-Command -Name "aarch64-w64-mingw32-gcc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).Path
+    $arm64CXXPath = (Get-Command -Name "aarch64-w64-mingw32-g++.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).Path
+    if (-not $arm64CCPath -or -not $arm64CXXPath) {
+        $arm64Toolchain = Get-ChildItem "C:\Program Files\llvm-mingw-*-x86_64*\bin" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($arm64Toolchain) {
+            $arm64CCPath = (Get-Item (Join-Path $arm64Toolchain.FullName "aarch64-w64-mingw32-gcc.exe") -ErrorAction SilentlyContinue).FullName
+            $arm64CXXPath = (Get-Item (Join-Path $arm64Toolchain.FullName "aarch64-w64-mingw32-g++.exe") -ErrorAction SilentlyContinue).FullName
+        }
+    }
     # TODO: support other Windows ARM64 cross-compile toolchain layouts as needed.
-    if ($arm64CC -and $arm64CXX -and $arm64CC.Path -notlike "*\clangarm64\*" -and $arm64CXX.Path -notlike "*\clangarm64\*") {
+    if ($arm64CCPath -and $arm64CXXPath -and $arm64CCPath -notlike "*\clangarm64\*" -and $arm64CXXPath -notlike "*\clangarm64\*") {
         $script:WINDOWS_ARM64_CROSS_COMPILE = $true
-        $script:WINDOWS_ARM64_CC = $arm64CC.Path
-        $script:WINDOWS_ARM64_CXX = $arm64CXX.Path
+        $script:WINDOWS_ARM64_CC = $arm64CCPath
+        $script:WINDOWS_ARM64_CXX = $arm64CXXPath
     } else {
         $script:WINDOWS_ARM64_CROSS_COMPILE = $false
     }
@@ -187,7 +187,7 @@ function checkEnv {
     } else {
         Write-Output "Using CMake generator: $env:CMAKE_GENERATOR"
     }
-    enableMsvcForNinja
+    ensureMsvcForNinja
     if ($env:OLLAMA_BUILD_PARALLEL) {
         $script:JOBS=[int]$env:OLLAMA_BUILD_PARALLEL
     } else {
