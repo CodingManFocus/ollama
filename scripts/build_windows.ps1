@@ -478,13 +478,15 @@ function withWindowsArm64GoEnv {
     $oldCXX = $env:CXX
     $oldPath = $env:PATH
     $compilerDir = Split-Path -Parent $script:WINDOWS_ARM64_CC
+    $compiler = Split-Path -Leaf $script:WINDOWS_ARM64_CC
+    $compilerXX = Split-Path -Leaf $script:WINDOWS_ARM64_CXX
     try {
         $env:GOOS = "windows"
         $env:GOARCH = "arm64"
         $env:CGO_ENABLED = "1"
-        $env:CC = $script:WINDOWS_ARM64_CC
-        $env:CXX = $script:WINDOWS_ARM64_CXX
         $env:PATH = "$compilerDir;$oldPath"
+        $env:CC = $compiler
+        $env:CXX = $compilerXX
         & $body
     } finally {
         $env:GOOS = $oldGOOS
