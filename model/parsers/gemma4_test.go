@@ -552,6 +552,96 @@ func TestGemma4Parser_StreamingToolCall(t *testing.T) {
 	}
 }
 
+func TestGemma4Parser_IgnoresPrematureToolCallCloseInsideArguments(t *testing.T) {
+	tests := []struct {
+		name              string
+		chunks            []string
+		expectedToolCalls []api.ToolCall
+	}{
+		{
+			name: "same_chunk_gemma_string",
+			chunks: []string{
+				`<|tool_call>call:some_tool{arg:<|"|>partial<tool_call|><|"|>,dump:true}<tool_call|>`,
+			},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "some_tool",
+						Arguments: testArgs(map[string]any{
+							"arg":  "partial<tool_call|>",
+							"dump": true,
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "same_chunk_nested_array",
+			chunks: []string{
+				`<|tool_call>call:process{items:[<|"|>a<tool_call|><|"|>,<|"|>b<|"|>]}<tool_call|>`,
+			},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "process",
+						Arguments: testArgs(map[string]any{
+							"items": []any{"a<tool_call|>", "b"},
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "split_across_chunks",
+			chunks: []string{
+				`<|tool_call>call:some_tool{arg:<|"|>partial<tool_`,
+				`call|><|"|>,dump:true}<tool_`,
+				`call|>`,
+			},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "some_tool",
+						Arguments: testArgs(map[string]any{
+							"arg":  "partial<tool_call|>",
+							"dump": true,
+						}),
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := &Gemma4Parser{hasThinkingSupport: false}
+			parser.Init(nil, nil, nil)
+
+			var finalContent strings.Builder
+			var finalToolCalls []api.ToolCall
+
+			for i, chunk := range tt.chunks {
+				done := i == len(tt.chunks)-1
+				content, _, toolCalls, err := parser.Add(chunk, done)
+				if err != nil {
+					t.Fatalf("Add() error on chunk %d: %v", i, err)
+				}
+
+				finalContent.WriteString(content)
+				finalToolCalls = append(finalToolCalls, toolCalls...)
+			}
+
+			if finalContent.String() != "" {
+				t.Errorf("expected no leaked content, got %q", finalContent.String())
+			}
+
+			if diff := cmp.Diff(tt.expectedToolCalls, finalToolCalls, argsComparer); diff != "" {
+				t.Errorf("tool calls mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestGemma4Parser_IgnoresExtraToolCallCloseTags(t *testing.T) {
 	tests := []struct {
 		name            string

@@ -291,7 +291,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 		return events, false
 
 	case Gemma4CollectingToolCall:
-		if idx := strings.Index(bufStr, gemma4ToolCallCloseTag); idx != -1 {
+		if idx := gemma4ToolCallCloseIndex(bufStr); idx != -1 {
 			toolCallContent := bufStr[:idx]
 			remaining := bufStr[idx+len(gemma4ToolCallCloseTag):]
 			remaining = strings.TrimLeftFunc(remaining, unicode.IsSpace)
@@ -371,6 +371,66 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 	}
 
 	return events, false
+}
+
+func gemma4ToolCallCloseIndex(s string) int {
+	inGemmaString := false
+	inJSONQuotedString := false
+	escaped := false
+	sawArgs := false
+	depth := 0
+
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], gemma4StringDelimiter) {
+			if !inJSONQuotedString {
+				inGemmaString = !inGemmaString
+			}
+			i += len(gemma4StringDelimiter)
+			continue
+		}
+
+		if strings.HasPrefix(s[i:], gemma4ToolCallCloseTag) {
+			if sawArgs && depth == 0 && !inGemmaString && !inJSONQuotedString {
+				return i
+			}
+			i += len(gemma4ToolCallCloseTag)
+			continue
+		}
+
+		ch := s[i]
+		if inGemmaString {
+			i++
+			continue
+		}
+
+		if inJSONQuotedString {
+			if ch == '"' && !escaped {
+				inJSONQuotedString = false
+			}
+			escaped = ch == '\\' && !escaped
+			if ch != '\\' {
+				escaped = false
+			}
+			i++
+			continue
+		}
+
+		switch ch {
+		case '"':
+			inJSONQuotedString = true
+			escaped = false
+		case '{', '[':
+			sawArgs = true
+			depth++
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		}
+		i++
+	}
+
+	return -1
 }
 
 // parseGemma4ToolCall parses a tool call in Gemma 4 format:
