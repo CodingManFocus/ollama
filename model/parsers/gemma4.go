@@ -3,6 +3,7 @@ package parsers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -32,6 +33,8 @@ const (
 
 var (
 	gemma4QuotedStringRe = regexp.MustCompile(`(?s)<\|"\|>(.*?)<\|"\|>`)
+
+	maxGemma4ToolCallBufferBytes = 8 * 1024 * 1024
 )
 
 type Gemma4Parser struct {
@@ -99,7 +102,10 @@ func (gemma4EventToolCall) isGemma4Event()        {}
 
 func (p *Gemma4Parser) Add(s string, done bool) (content string, thinking string, calls []api.ToolCall, err error) {
 	p.buffer.WriteString(s)
-	events := p.parseEvents(done)
+	events, err := p.parseEvents(done)
+	if err != nil {
+		return "", "", nil, err
+	}
 
 	var toolCalls []api.ToolCall
 	var contentSb strings.Builder
@@ -126,19 +132,23 @@ func (p *Gemma4Parser) Add(s string, done bool) (content string, thinking string
 	return contentSb.String(), thinkingSb.String(), toolCalls, nil
 }
 
-func (p *Gemma4Parser) parseEvents(done bool) []gemma4Event {
+func (p *Gemma4Parser) parseEvents(done bool) ([]gemma4Event, error) {
 	var all []gemma4Event
 
 	keepLooping := true
 	for keepLooping {
 		var events []gemma4Event
-		events, keepLooping = p.eat(done)
+		var err error
+		events, keepLooping, err = p.eat(done)
+		if err != nil {
+			return all, err
+		}
 		if len(events) > 0 {
 			all = append(all, events...)
 		}
 	}
 
-	return all
+	return all, nil
 }
 
 // longestOverlap returns the longest overlap between the suffix of bufStr and
@@ -153,11 +163,11 @@ func longestOverlap(bufStr string, tags ...string) int {
 	return maxOverlap
 }
 
-func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
+func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool, error) {
 	var events []gemma4Event
 	bufStr := p.buffer.String()
 	if bufStr == "" {
-		return events, false
+		return events, false, nil
 	}
 
 	switch p.state {
@@ -175,7 +185,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 			if contentBefore = strings.TrimRightFunc(contentBefore, unicode.IsSpace); len(contentBefore) > 0 {
 				events = append(events, gemma4EventContent{content: contentBefore})
 			}
-			return events, true
+			return events, true, nil
 		}
 
 		// Check for tool call open tag
@@ -190,7 +200,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 			if contentBefore = strings.TrimRightFunc(contentBefore, unicode.IsSpace); len(contentBefore) > 0 {
 				events = append(events, gemma4EventContent{content: contentBefore})
 			}
-			return events, true
+			return events, true, nil
 		}
 
 		// Check for partial tag overlap
@@ -207,7 +217,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 				if len(unambiguous) > 0 {
 					events = append(events, gemma4EventContent{content: unambiguous})
 				}
-				return events, false
+				return events, false, nil
 			}
 		}
 
@@ -216,7 +226,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 		if len(bufStr) > 0 {
 			events = append(events, gemma4EventContent{content: bufStr})
 		}
-		return events, false
+		return events, false, nil
 
 	case Gemma4CollectingThinking:
 		// Strip channel name (e.g., "thought\n") after <|channel>.
@@ -230,7 +240,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 				p.needsChannelNameStrip = false
 			} else if !done && (bufStr == "thought" || strings.HasPrefix("thought\n", bufStr)) {
 				// Partial match — wait for more data.
-				return events, false
+				return events, false, nil
 			} else {
 				// No match (different channel name or no newline) — don't strip.
 				p.needsChannelNameStrip = false
@@ -249,7 +259,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 			if len(thinking) > 0 {
 				events = append(events, gemma4EventThinkingContent{content: thinking})
 			}
-			return events, true
+			return events, true, nil
 		}
 
 		// Check for partial close tag
@@ -266,7 +276,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 				if len(unambiguous) > 0 {
 					events = append(events, gemma4EventThinkingContent{content: unambiguous})
 				}
-				return events, false
+				return events, false, nil
 			}
 		}
 
@@ -288,10 +298,11 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 				events = append(events, gemma4EventThinkingContent{content: bufStr})
 			}
 		}
-		return events, false
+		return events, false, nil
 
 	case Gemma4CollectingToolCall:
-		if idx := gemma4ToolCallCloseIndex(bufStr); idx != -1 {
+		idx, ignoredIdx, ignoredInString := gemma4ToolCallCloseIndex(bufStr)
+		if idx != -1 {
 			toolCallContent := bufStr[:idx]
 			remaining := bufStr[idx+len(gemma4ToolCallCloseTag):]
 			remaining = strings.TrimLeftFunc(remaining, unicode.IsSpace)
@@ -305,7 +316,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 			} else {
 				slog.Warn("gemma4 tool call parsing failed", "error", err, "content", toolCallContent)
 			}
-			return events, true
+			return events, true, nil
 		}
 
 		// If done, flush any accumulated tool call content even without closing tag.
@@ -313,16 +324,27 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 		if done && len(bufStr) > 0 {
 			p.buffer.Reset()
 			p.state = Gemma4CollectingContent
-			if toolCall, err := parseGemma4ToolCall(bufStr, p.tools); err == nil {
+			if toolCall, err := p.parseGemma4ToolCallWithFallback(bufStr, ignoredIdx, ignoredInString); err == nil {
 				events = append(events, gemma4EventToolCall{toolCall: toolCall})
 			} else {
 				slog.Warn("gemma4 tool call flush on done failed", "error", err, "content", bufStr)
 			}
-			return events, false
+			return events, false, nil
+		}
+
+		if len(bufStr) > maxGemma4ToolCallBufferBytes {
+			p.buffer.Reset()
+			p.state = Gemma4CollectingContent
+			if toolCall, err := p.parseGemma4ToolCallWithFallback(bufStr, ignoredIdx, ignoredInString); err == nil {
+				events = append(events, gemma4EventToolCall{toolCall: toolCall})
+				return events, false, nil
+			}
+
+			return events, false, fmt.Errorf("gemma4 tool call exceeded %d bytes without a valid closing tag", maxGemma4ToolCallBufferBytes)
 		}
 
 		// Wait for closing tag
-		return events, false
+		return events, false, nil
 
 	case Gemma4IgnoringPostToolCallNoise:
 		// We've observed Gemma 4 occasionally emitting extra <tool_call|> tags
@@ -355,7 +377,7 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 
 	strippedPostToolCallNoise:
 		if bufStr == "" {
-			return events, false
+			return events, false, nil
 		}
 
 		if strings.HasPrefix(gemma4ToolCallCloseTag, bufStr) || strings.HasPrefix(gemma4ToolResponseTag, bufStr) {
@@ -363,22 +385,64 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool) {
 				p.buffer.Reset()
 				p.state = Gemma4CollectingContent
 			}
-			return events, false
+			return events, false, nil
 		}
 
 		p.state = Gemma4CollectingContent
-		return events, true
+		return events, true, nil
 	}
 
-	return events, false
+	return events, false, nil
 }
 
-func gemma4ToolCallCloseIndex(s string) int {
+func (p *Gemma4Parser) parseGemma4ToolCallWithFallback(s string, ignoredCloseIdx int, ignoredCloseInString bool) (api.ToolCall, error) {
+	toolCall, err := parseGemma4ToolCallStrict(s)
+	if err == nil {
+		return toolCall, nil
+	}
+
+	var fallbackErr error
+	if ignoredCloseIdx != -1 && ignoredCloseInString {
+		// If generation continues after a close tag that was ignored because it
+		// appeared inside an unfinished string, try the old boundary before
+		// repairing the full buffer. This preserves existing malformed-output
+		// repair behavior without treating ignored tags as real boundaries
+		// during streaming.
+		fallbackToolCall, err := parseGemma4ToolCall(s[:ignoredCloseIdx], p.tools)
+		if err == nil {
+			return fallbackToolCall, nil
+		}
+		fallbackErr = err
+	}
+
+	repairedToolCall, repairErr := parseGemma4ToolCall(s, p.tools)
+	if repairErr == nil {
+		return repairedToolCall, nil
+	}
+
+	if ignoredCloseIdx != -1 && !ignoredCloseInString && !gemma4IgnoredCloseIsTerminal(s, ignoredCloseIdx) {
+		fallbackToolCall, err := parseGemma4ToolCall(s[:ignoredCloseIdx], p.tools)
+		if err == nil {
+			return fallbackToolCall, nil
+		}
+		fallbackErr = err
+	}
+
+	return api.ToolCall{}, errors.Join(err, fallbackErr, repairErr)
+}
+
+func gemma4IgnoredCloseIsTerminal(s string, ignoredCloseIdx int) bool {
+	return gemma4TrimRightSpaceIndex(s) == ignoredCloseIdx+len(gemma4ToolCallCloseTag)
+}
+
+func gemma4ToolCallCloseIndex(s string) (int, int, bool) {
 	inGemmaString := false
 	inJSONQuotedString := false
 	escaped := false
 	sawArgs := false
 	depth := 0
+	ignoredIdx := -1
+	ignoredInString := false
 
 	for i := 0; i < len(s); {
 		if strings.HasPrefix(s[i:], gemma4StringDelimiter) {
@@ -391,7 +455,11 @@ func gemma4ToolCallCloseIndex(s string) int {
 
 		if strings.HasPrefix(s[i:], gemma4ToolCallCloseTag) {
 			if sawArgs && depth == 0 && !inGemmaString && !inJSONQuotedString {
-				return i
+				return i, ignoredIdx, ignoredInString
+			}
+			if ignoredIdx == -1 {
+				ignoredIdx = i
+				ignoredInString = inGemmaString || inJSONQuotedString
 			}
 			i += len(gemma4ToolCallCloseTag)
 			continue
@@ -430,37 +498,47 @@ func gemma4ToolCallCloseIndex(s string) int {
 		i++
 	}
 
-	return -1
+	return -1, ignoredIdx, ignoredInString
 }
 
 // parseGemma4ToolCall parses a tool call in Gemma 4 format:
 // call:NAME{key:value,key:value}
 func parseGemma4ToolCall(content string, tools []api.Tool) (api.ToolCall, error) {
-	// Expected format: call:NAME{args}
-	if !strings.HasPrefix(content, "call:") {
-		return api.ToolCall{}, errors.New("expected 'call:' prefix")
-	}
-	content = content[len("call:"):]
-
-	// Find the opening brace for args
-	braceIdx := strings.Index(content, "{")
-	if braceIdx == -1 {
-		return api.ToolCall{}, errors.New("expected '{' in tool call")
+	toolCall, err := parseGemma4ToolCallStrict(content)
+	if err == nil {
+		return toolCall, nil
 	}
 
-	toolName := strings.TrimSpace(content[:braceIdx])
-	argsStr := content[braceIdx:]
+	toolName, argsStr, prefixErr := gemma4ToolCallParts(content)
+	if prefixErr != nil {
+		return api.ToolCall{}, errors.Join(err, prefixErr)
+	}
+
+	repairedArgs, repairErr := repairGemma4ToolCallArgs(argsStr, toolName, tools)
+	if repairErr != nil {
+		return api.ToolCall{}, errors.Join(err, repairErr)
+	}
+
+	return api.ToolCall{
+		Function: api.ToolCallFunction{
+			Name:      toolName,
+			Arguments: repairedArgs,
+		},
+	}, nil
+}
+
+func parseGemma4ToolCallStrict(content string) (api.ToolCall, error) {
+	toolName, argsStr, err := gemma4ToolCallParts(content)
+	if err != nil {
+		return api.ToolCall{}, err
+	}
 
 	// Convert Gemma 4 argument format to JSON
 	jsonStr := gemma4ArgsToJSON(argsStr)
 
 	var args api.ToolCallFunctionArguments
 	if err := json.Unmarshal([]byte(jsonStr), &args); err != nil {
-		repairedArgs, repairErr := repairGemma4ToolCallArgs(argsStr, toolName, tools)
-		if repairErr != nil {
-			return api.ToolCall{}, errors.Join(err, repairErr)
-		}
-		args = repairedArgs
+		return api.ToolCall{}, err
 	}
 
 	return api.ToolCall{
@@ -469,6 +547,25 @@ func parseGemma4ToolCall(content string, tools []api.Tool) (api.ToolCall, error)
 			Arguments: args,
 		},
 	}, nil
+}
+
+func gemma4ToolCallParts(content string) (string, string, error) {
+	// Expected format: call:NAME{args}
+	if !strings.HasPrefix(content, "call:") {
+		return "", "", errors.New("expected 'call:' prefix")
+	}
+	content = content[len("call:"):]
+
+	// Find the opening brace for args
+	braceIdx := strings.Index(content, "{")
+	if braceIdx == -1 {
+		return "", "", errors.New("expected '{' in tool call")
+	}
+
+	toolName := strings.TrimSpace(content[:braceIdx])
+	argsStr := content[braceIdx:]
+
+	return toolName, argsStr, nil
 }
 
 // gemma4ArgsToJSON converts Gemma 4's custom argument format to valid JSON.

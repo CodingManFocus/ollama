@@ -642,6 +642,231 @@ func TestGemma4Parser_IgnoresPrematureToolCallCloseInsideArguments(t *testing.T)
 	}
 }
 
+func TestGemma4Parser_ToolCallCloseEscapeValve(t *testing.T) {
+	tests := []struct {
+		name              string
+		chunks            []string
+		tools             []api.Tool
+		expectedToolCalls []api.ToolCall
+	}{
+		{
+			name: "done_without_real_close_after_literal_close_inside_string",
+			chunks: []string{
+				`<|tool_call>call:some_tool{arg:<|"|>literal <tool_call|> only<|"|>,dump:true}`,
+			},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "some_tool",
+						Arguments: testArgs(map[string]any{
+							"arg":  "literal <tool_call|> only",
+							"dump": true,
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "done_falls_back_to_ignored_close_for_unclosed_gemma_string",
+			chunks: []string{
+				`<|tool_call>call:bash{command:<|"|>ls}<tool_call|>`,
+			},
+			tools: []api.Tool{gemma4TestStringTool("bash", "command")},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "bash",
+						Arguments: testArgs(map[string]any{
+							"command": "ls",
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "done_falls_back_to_ignored_close_for_split_unclosed_gemma_string",
+			chunks: []string{
+				`<|tool_call>call:bash{command:<|"|>ls}`,
+				`<tool_`,
+				`call|>`,
+			},
+			tools: []api.Tool{gemma4TestStringTool("bash", "command")},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "bash",
+						Arguments: testArgs(map[string]any{
+							"command": "ls",
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "done_falls_back_to_ignored_close_before_trailing_text",
+			chunks: []string{
+				`<|tool_call>call:bash{command:<|"|>ls}<tool_call|> trailing text`,
+			},
+			tools: []api.Tool{gemma4TestStringTool("bash", "command")},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "bash",
+						Arguments: testArgs(map[string]any{
+							"command": "ls",
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "done_falls_back_to_ignored_close_for_single_quote_repair",
+			chunks: []string{
+				`<|tool_call>call:grep{include:<|"|>*.py<|"|>,pattern:':\s*\w+'<|"|>}<tool_call|>`,
+			},
+			tools: []api.Tool{gemma4TestStringTool("grep", "include", "pattern")},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "grep",
+						Arguments: testArgs(map[string]any{
+							"include": "*.py",
+							"pattern": `:\s*\w+`,
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "json_quoted_string_can_contain_fake_close_before_real_close",
+			chunks: []string{
+				`<|tool_call>call:search{query:"literal <tool_call|> marker",limit:2}<tool_call|>`,
+			},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "search",
+						Arguments: testArgs(map[string]any{
+							"query": "literal <tool_call|> marker",
+							"limit": 2.0,
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "multiple_fake_closes_inside_nested_values_before_real_close",
+			chunks: []string{
+				`<|tool_call>call:process{items:[<|"|>a<tool_call|><|"|>,{note:"b <tool_call|> c"}],meta:{ok:true}}<tool_call|>`,
+			},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "process",
+						Arguments: testArgs(map[string]any{
+							"items": []any{
+								"a<tool_call|>",
+								map[string]any{"note": "b <tool_call|> c"},
+							},
+							"meta": map[string]any{"ok": true},
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "raw_terminal_multiline_string_without_close_still_repairs",
+			chunks: []string{
+				"<|tool_call>call:write{content:\n\n# Title\n\nbody with {braces}, [array], and <tool_call|> text",
+			},
+			tools: []api.Tool{gemma4TestStringTool("write", "content")},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "write",
+						Arguments: testArgs(map[string]any{
+							"content": "\n\n# Title\n\nbody with {braces}, [array], and <tool_call|> text",
+						}),
+					},
+				},
+			},
+		},
+		{
+			name: "raw_terminal_string_ending_with_fake_close_still_repairs",
+			chunks: []string{
+				"<|tool_call>call:write{content:body ends with literal <tool_call|>",
+			},
+			tools: []api.Tool{gemma4TestStringTool("write", "content")},
+			expectedToolCalls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Name: "write",
+						Arguments: testArgs(map[string]any{
+							"content": "body ends with literal <tool_call|>",
+						}),
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := &Gemma4Parser{hasThinkingSupport: false}
+			parser.Init(tt.tools, nil, nil)
+
+			var finalContent strings.Builder
+			var finalToolCalls []api.ToolCall
+
+			for i, chunk := range tt.chunks {
+				done := i == len(tt.chunks)-1
+				content, _, toolCalls, err := parser.Add(chunk, done)
+				if err != nil {
+					t.Fatalf("Add() error on chunk %d: %v", i, err)
+				}
+
+				finalContent.WriteString(content)
+				finalToolCalls = append(finalToolCalls, toolCalls...)
+			}
+
+			if finalContent.String() != "" {
+				t.Errorf("expected no leaked content, got %q", finalContent.String())
+			}
+
+			if diff := cmp.Diff(tt.expectedToolCalls, finalToolCalls, argsComparer); diff != "" {
+				t.Errorf("tool calls mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGemma4Parser_ToolCallBufferLimit(t *testing.T) {
+	oldLimit := maxGemma4ToolCallBufferBytes
+	maxGemma4ToolCallBufferBytes = 64
+	defer func() {
+		maxGemma4ToolCallBufferBytes = oldLimit
+	}()
+
+	parser := &Gemma4Parser{hasThinkingSupport: false}
+	parser.Init(nil, nil, nil)
+
+	content, thinking, toolCalls, err := parser.Add(`<|tool_call>`+strings.Repeat("x", maxGemma4ToolCallBufferBytes+1), false)
+	if err == nil {
+		t.Fatal("expected buffer limit error")
+	}
+	if content != "" || thinking != "" || len(toolCalls) != 0 {
+		t.Fatalf("expected empty output on buffer limit, got content=%q thinking=%q toolCalls=%v", content, thinking, toolCalls)
+	}
+
+	content, thinking, toolCalls, err = parser.Add("recovered", true)
+	if err != nil {
+		t.Fatalf("parser did not recover after buffer limit: %v", err)
+	}
+	if content != "recovered" || thinking != "" || len(toolCalls) != 0 {
+		t.Fatalf("expected parser to recover as content parser, got content=%q thinking=%q toolCalls=%v", content, thinking, toolCalls)
+	}
+}
+
 func TestGemma4Parser_IgnoresExtraToolCallCloseTags(t *testing.T) {
 	tests := []struct {
 		name            string

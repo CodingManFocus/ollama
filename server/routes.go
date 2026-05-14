@@ -558,7 +558,9 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		// TODO (jmorganca): avoid building the response twice both here and below
 		var sb strings.Builder
 		defer close(ch)
-		if err := r.Completion(c.Request.Context(), llm.CompletionRequest{
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		defer cancel()
+		if err := r.Completion(ctx, llm.CompletionRequest{
 			Prompt:      prompt,
 			Images:      images,
 			Format:      req.Format,
@@ -585,6 +587,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 			if builtinParser != nil {
 				content, thinking, toolCalls, err := builtinParser.Add(cr.Content, cr.Done)
 				if err != nil {
+					cancel()
 					ch <- gin.H{"error": err.Error()}
 					return
 				}
@@ -2537,6 +2540,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 
 					content, thinking, toolCalls, err := builtinParser.Add(r.Content, r.Done)
 					if err != nil {
+						cancel()
 						ch <- gin.H{"error": err.Error()}
 						return
 					}
