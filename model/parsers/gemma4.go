@@ -3,7 +3,6 @@ package parsers
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -29,12 +28,12 @@ const (
 	gemma4ToolCallCloseTag = "<tool_call|>"
 	gemma4ToolResponseTag  = "<|tool_response>"
 	gemma4StringDelimiter  = `<|"|>`
+
+	gemma4MissingToolCallCloseLookaheadBytes = 200
 )
 
 var (
 	gemma4QuotedStringRe = regexp.MustCompile(`(?s)<\|"\|>(.*?)<\|"\|>`)
-
-	maxGemma4ToolCallBufferBytes = 8 * 1024 * 1024
 )
 
 type Gemma4Parser struct {
@@ -302,6 +301,20 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool, error) {
 
 	case Gemma4CollectingToolCall:
 		idx, ignoredIdx, ignoredInString := gemma4ToolCallCloseIndex(bufStr)
+		if endIdx := gemma4ToolCallArgsEndIndex(bufStr); endIdx != -1 && gemma4ShouldFlushMissingToolCallClose(bufStr, endIdx) {
+			toolCallContent := bufStr[:endIdx+1]
+			if toolCall, err := parseGemma4ToolCallStrict(toolCallContent); err == nil {
+				remaining := bufStr[endIdx+1:]
+
+				p.buffer.Reset()
+				p.buffer.WriteString(remaining)
+				p.state = Gemma4IgnoringPostToolCallNoise
+
+				events = append(events, gemma4EventToolCall{toolCall: toolCall})
+				return events, true, nil
+			}
+		}
+
 		if idx != -1 {
 			toolCallContent := bufStr[:idx]
 			remaining := bufStr[idx+len(gemma4ToolCallCloseTag):]
@@ -330,17 +343,6 @@ func (p *Gemma4Parser) eat(done bool) ([]gemma4Event, bool, error) {
 				slog.Warn("gemma4 tool call flush on done failed", "error", err, "content", bufStr)
 			}
 			return events, false, nil
-		}
-
-		if len(bufStr) > maxGemma4ToolCallBufferBytes {
-			p.buffer.Reset()
-			p.state = Gemma4CollectingContent
-			if toolCall, err := p.parseGemma4ToolCallWithFallback(bufStr, ignoredIdx, ignoredInString); err == nil {
-				events = append(events, gemma4EventToolCall{toolCall: toolCall})
-				return events, false, nil
-			}
-
-			return events, false, fmt.Errorf("gemma4 tool call exceeded %d bytes without a valid closing tag", maxGemma4ToolCallBufferBytes)
 		}
 
 		// Wait for closing tag
@@ -433,6 +435,96 @@ func (p *Gemma4Parser) parseGemma4ToolCallWithFallback(s string, ignoredCloseIdx
 
 func gemma4IgnoredCloseIsTerminal(s string, ignoredCloseIdx int) bool {
 	return gemma4TrimRightSpaceIndex(s) == ignoredCloseIdx+len(gemma4ToolCallCloseTag)
+}
+
+func gemma4ShouldFlushMissingToolCallClose(s string, argsEndIdx int) bool {
+	afterArgs := s[argsEndIdx+1:]
+	closeIdx := strings.Index(afterArgs, gemma4ToolCallCloseTag)
+
+	if idx := strings.Index(afterArgs, gemma4ToolCallOpenTag); idx != -1 && idx < gemma4MissingToolCallCloseLookaheadBytes {
+		if closeIdx == -1 || idx < closeIdx {
+			return true
+		}
+	}
+
+	if idx := strings.Index(afterArgs, gemma4ToolResponseTag); idx != -1 && idx < gemma4MissingToolCallCloseLookaheadBytes {
+		if closeIdx == -1 || idx < closeIdx {
+			return true
+		}
+	}
+
+	if closeIdx != -1 {
+		return closeIdx >= gemma4MissingToolCallCloseLookaheadBytes
+	}
+
+	if len(afterArgs) >= gemma4MissingToolCallCloseLookaheadBytes+len(gemma4ToolCallCloseTag)-1 {
+		return true
+	}
+
+	return false
+}
+
+func gemma4ToolCallArgsEndIndex(s string) int {
+	if !strings.HasPrefix(s, "call:") {
+		return -1
+	}
+
+	braceIdx := strings.Index(s[len("call:"):], "{")
+	if braceIdx == -1 {
+		return -1
+	}
+	braceIdx += len("call:")
+
+	inGemmaString := false
+	inJSONQuotedString := false
+	escaped := false
+	depth := 0
+
+	for i := braceIdx; i < len(s); {
+		if strings.HasPrefix(s[i:], gemma4StringDelimiter) {
+			if !inJSONQuotedString {
+				inGemmaString = !inGemmaString
+			}
+			i += len(gemma4StringDelimiter)
+			continue
+		}
+
+		ch := s[i]
+		if inGemmaString {
+			i++
+			continue
+		}
+
+		if inJSONQuotedString {
+			if ch == '"' && !escaped {
+				inJSONQuotedString = false
+			}
+			escaped = ch == '\\' && !escaped
+			if ch != '\\' {
+				escaped = false
+			}
+			i++
+			continue
+		}
+
+		switch ch {
+		case '"':
+			inJSONQuotedString = true
+			escaped = false
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth > 0 {
+				depth--
+				if depth == 0 && ch == '}' {
+					return i
+				}
+			}
+		}
+		i++
+	}
+
+	return -1
 }
 
 func gemma4ToolCallCloseIndex(s string) (int, int, bool) {

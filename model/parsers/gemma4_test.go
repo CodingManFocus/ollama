@@ -840,31 +840,135 @@ func TestGemma4Parser_ToolCallCloseEscapeValve(t *testing.T) {
 	}
 }
 
-func TestGemma4Parser_ToolCallBufferLimit(t *testing.T) {
-	oldLimit := maxGemma4ToolCallBufferBytes
-	maxGemma4ToolCallBufferBytes = 64
-	defer func() {
-		maxGemma4ToolCallBufferBytes = oldLimit
-	}()
+func TestGemma4Parser_MissingToolCallCloseLookahead(t *testing.T) {
+	t.Run("waits_for_close_tag_within_lookahead", func(t *testing.T) {
+		parser := &Gemma4Parser{hasThinkingSupport: false}
+		parser.Init(nil, nil, nil)
 
-	parser := &Gemma4Parser{hasThinkingSupport: false}
-	parser.Init(nil, nil, nil)
+		content, thinking, toolCalls, err := parser.Add(`<|tool_call>call:search{query:<|"|>hi<|"|>}`+strings.Repeat(" ", gemma4MissingToolCallCloseLookaheadBytes-1), false)
+		if err != nil {
+			t.Fatalf("Add() error: %v", err)
+		}
+		if content != "" || thinking != "" || len(toolCalls) != 0 {
+			t.Fatalf("expected parser to wait, got content=%q thinking=%q toolCalls=%v", content, thinking, toolCalls)
+		}
 
-	content, thinking, toolCalls, err := parser.Add(`<|tool_call>`+strings.Repeat("x", maxGemma4ToolCallBufferBytes+1), false)
-	if err == nil {
-		t.Fatal("expected buffer limit error")
-	}
-	if content != "" || thinking != "" || len(toolCalls) != 0 {
-		t.Fatalf("expected empty output on buffer limit, got content=%q thinking=%q toolCalls=%v", content, thinking, toolCalls)
-	}
+		content, thinking, toolCalls, err = parser.Add(gemma4ToolCallCloseTag, false)
+		if err != nil {
+			t.Fatalf("Add() error after close tag: %v", err)
+		}
+		if content != "" || thinking != "" {
+			t.Fatalf("expected no content after close tag, got content=%q thinking=%q", content, thinking)
+		}
+		expected := []api.ToolCall{
+			{
+				Function: api.ToolCallFunction{
+					Name: "search",
+					Arguments: testArgs(map[string]any{
+						"query": "hi",
+					}),
+				},
+			},
+		}
+		if diff := cmp.Diff(expected, toolCalls, argsComparer); diff != "" {
+			t.Fatalf("tool calls mismatch (-want +got):\n%s", diff)
+		}
+	})
 
-	content, thinking, toolCalls, err = parser.Add("recovered", true)
-	if err != nil {
-		t.Fatalf("parser did not recover after buffer limit: %v", err)
-	}
-	if content != "recovered" || thinking != "" || len(toolCalls) != 0 {
-		t.Fatalf("expected parser to recover as content parser, got content=%q thinking=%q toolCalls=%v", content, thinking, toolCalls)
-	}
+	t.Run("flushes_strict_tool_call_after_lookahead_without_close_tag", func(t *testing.T) {
+		parser := &Gemma4Parser{hasThinkingSupport: false}
+		parser.Init(nil, nil, nil)
+
+		content, thinking, toolCalls, err := parser.Add(`<|tool_call>call:search{query:<|"|>hi<|"|>}`+strings.Repeat(" ", gemma4MissingToolCallCloseLookaheadBytes+len(gemma4ToolCallCloseTag)-1), false)
+		if err != nil {
+			t.Fatalf("Add() error: %v", err)
+		}
+		if content != "" || thinking != "" {
+			t.Fatalf("expected no leaked whitespace content, got content=%q thinking=%q", content, thinking)
+		}
+		expected := []api.ToolCall{
+			{
+				Function: api.ToolCallFunction{
+					Name: "search",
+					Arguments: testArgs(map[string]any{
+						"query": "hi",
+					}),
+				},
+			},
+		}
+		if diff := cmp.Diff(expected, toolCalls, argsComparer); diff != "" {
+			t.Fatalf("tool calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("next_tool_call_open_tag_is_missing_close_boundary", func(t *testing.T) {
+		parser := &Gemma4Parser{hasThinkingSupport: false}
+		parser.Init(nil, nil, nil)
+
+		content, thinking, toolCalls, err := parser.Add(`<|tool_call>call:first{ok:true}<|tool_call>call:second{ok:false}<tool_call|>`, false)
+		if err != nil {
+			t.Fatalf("Add() error: %v", err)
+		}
+		if content != "" || thinking != "" {
+			t.Fatalf("expected no content, got content=%q thinking=%q", content, thinking)
+		}
+		expected := []api.ToolCall{
+			{
+				Function: api.ToolCallFunction{
+					Name: "first",
+					Arguments: testArgs(map[string]any{
+						"ok": true,
+					}),
+				},
+			},
+			{
+				Function: api.ToolCallFunction{
+					Index: 1,
+					Name:  "second",
+					Arguments: testArgs(map[string]any{
+						"ok": false,
+					}),
+				},
+			},
+		}
+		if diff := cmp.Diff(expected, toolCalls, argsComparer); diff != "" {
+			t.Fatalf("tool calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("does_not_early_repair_non_strict_args", func(t *testing.T) {
+		parser := &Gemma4Parser{hasThinkingSupport: false}
+		parser.Init([]api.Tool{gemma4TestStringTool("grep", "pattern")}, nil, nil)
+
+		content, thinking, toolCalls, err := parser.Add(`<|tool_call>call:grep{pattern:'x'}`+strings.Repeat(" ", gemma4MissingToolCallCloseLookaheadBytes+len(gemma4ToolCallCloseTag)-1), false)
+		if err != nil {
+			t.Fatalf("Add() error: %v", err)
+		}
+		if content != "" || thinking != "" || len(toolCalls) != 0 {
+			t.Fatalf("expected parser to wait for done fallback, got content=%q thinking=%q toolCalls=%v", content, thinking, toolCalls)
+		}
+
+		content, thinking, toolCalls, err = parser.Add("", true)
+		if err != nil {
+			t.Fatalf("Add() error on done: %v", err)
+		}
+		if content != "" || thinking != "" {
+			t.Fatalf("expected no content on done fallback, got content=%q thinking=%q", content, thinking)
+		}
+		expected := []api.ToolCall{
+			{
+				Function: api.ToolCallFunction{
+					Name: "grep",
+					Arguments: testArgs(map[string]any{
+						"pattern": "x",
+					}),
+				},
+			},
+		}
+		if diff := cmp.Diff(expected, toolCalls, argsComparer); diff != "" {
+			t.Fatalf("tool calls mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
 
 func TestGemma4Parser_IgnoresExtraToolCallCloseTags(t *testing.T) {
